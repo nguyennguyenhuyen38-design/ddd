@@ -1,0 +1,549 @@
+--[[
+    SAILOR PIECE - AUTO PASSIVE SNIPER V2 (FULL GUI)
+    Tác dụng: Tự động reroll cho đến khi ra passive với chỉ số mong muốn.
+    Hỗ trợ: Mobile Executor (Delta, Arceus X, v.v.)
+    Tính năng:
+        - GUI tùy chỉnh trực tiếp trong game (kéo thả được).
+        - Nhập tên passive, ngưỡng % tối thiểu.
+        - Lưu / Tải cấu hình.
+        - Nút Start / Stop.
+        - Hiển thị log trạng thái.
+]]
+
+-- ======================== SERVICES ========================
+local Players = game:GetService("Players")
+local Player = Players.LocalPlayer
+local PlayerGui = Player:WaitForChild("PlayerGui")
+local RunService = game:GetService("RunService")
+local HttpService = game:GetService("HttpService")
+local UserInputService = game:GetService("UserInputService")
+local CoreGui = game:GetService("CoreGui")
+local TweenService = game:GetService("TweenService")
+
+-- ======================== VARIABLES ========================
+local Sniper = {
+    Running = false,
+    TargetPassive = "Fortune Chosen",
+    MinDrop = 17.5,
+    MinLuck = 5.0,
+    MinDamage = 5.0,
+    RerollDelay = 3.5,
+    RollCount = 0,
+    RerollButton = nil,
+    Connection = nil
+}
+
+local Gui = {
+    ScreenGui = nil,
+    MainFrame = nil,
+    ToggleButton = nil,
+    Settings = {}
+}
+
+-- ======================== UTILITY FUNCTIONS ========================
+local function notify(title, text, duration)
+    pcall(function()
+        game:GetService("StarterGui"):SetCore("SendNotification", {
+            Title = title or "Sniper",
+            Text = text,
+            Duration = duration or 3
+        })
+    end)
+    print("[Sniper] " .. text)
+end
+
+local function addLog(message)
+    if Gui.LogBox then
+        local timestamp = os.date("%H:%M:%S")
+        Gui.LogBox.Text = "[" .. timestamp .. "] " .. message .. "\n" .. Gui.LogBox.Text
+        -- Giới hạn dòng log
+        local lines = Gui.LogBox.Text:split("\n")
+        if #lines > 15 then
+            table.remove(lines, #lines)
+            Gui.LogBox.Text = table.concat(lines, "\n")
+        end
+    end
+end
+
+-- Tìm nút Reroll trên giao diện
+local function findRerollButton()
+    for _, gui in ipairs(PlayerGui:GetDescendants()) do
+        if gui:IsA("TextButton") or gui:IsA("ImageButton") then
+            local name = gui.Name:lower()
+            local text = ""
+            pcall(function() text = gui.Text:lower() end)
+            if name:find("reroll") or text:find("reroll") or name:find("roll") or text:find("roll") then
+                if gui.Visible and gui.Active then
+                    return gui
+                end
+            end
+        end
+    end
+    return nil
+end
+
+-- Đọc text passive hiển thị
+local function getDisplayedPassiveText()
+    local texts = {}
+    for _, gui in ipairs(PlayerGui:GetDescendants()) do
+        if gui:IsA("TextLabel") and gui.Visible then
+            local txt = gui.Text
+            if txt and #txt > 5 then
+                table.insert(texts, txt)
+            end
+        end
+    end
+    return table.concat(texts, " ")
+end
+
+-- Parse dữ liệu passive từ text
+local function parsePassiveData(rawText)
+    if not rawText or rawText == "" then
+        return nil, {}
+    end
+    local lowerText = rawText:lower()
+    local passiveName = nil
+    local stats = {}
+    
+    -- Danh sách passive phổ biến
+    local mythicals = {"fortune chosen", "executioner", "rampage"}
+    for _, name in ipairs(mythicals) do
+        if lowerText:find(name) then
+            passiveName = name
+            break
+        end
+    end
+    
+    -- Parse +1 Drop
+    local dropPattern = "(%d+%.?%d*)%%?%s*for%s*%+1%s*drop"
+    local dropVal = lowerText:match(dropPattern)
+    if dropVal then
+        stats.Drop = tonumber(dropVal)
+    else
+        local altPattern = "%+(%d+)%s*drop"
+        local altVal = lowerText:match(altPattern)
+        if altVal then stats.Drop = tonumber(altVal) end
+    end
+    
+    -- Parse Luck
+    local luckPattern = "(%d+%.?%d*)%%?%s*luck"
+    local luckVal = lowerText:match(luckPattern)
+    if luckVal then
+        stats.Luck = tonumber(luckVal)
+    else
+        local rangePattern = "(%d+%.?%d*)%s*%-%s*%d+%.?%d*%%%s*luck"
+        local rangeVal = lowerText:match(rangePattern)
+        if rangeVal then stats.Luck = tonumber(rangeVal) end
+    end
+    
+    -- Parse Damage
+    local damagePattern = "(%d+%.?%d*)%%?%s*damage"
+    local damageVal = lowerText:match(damagePattern)
+    if damageVal then
+        stats.Damage = tonumber(damageVal)
+    else
+        local rangePattern = "(%d+%.?%d*)%s*%-%s*%d+%.?%d*%%%s*damage"
+        local rangeVal = lowerText:match(rangePattern)
+        if rangeVal then stats.Damage = tonumber(rangeVal) end
+    end
+    
+    return passiveName, stats
+end
+
+-- Click ảo vào button (mobile)
+local function clickButton(button)
+    if not button then return false end
+    pcall(function()
+        local vim = game:GetService("VirtualInputManager")
+        local pos = button.AbsolutePosition + button.AbsoluteSize / 2
+        vim:SendMouseButtonEvent(pos, 0, 0, 0, true, game, 1)
+        task.wait(0.05)
+        vim:SendMouseButtonEvent(pos, 0, 0, 0, false, game, 1)
+    end)
+    pcall(function()
+        for _, ev in ipairs(button:GetDescendants()) do
+            if ev:IsA("GuiButton") then
+                ev:InvokeServer()
+                break
+            end
+        end
+    end)
+    return true
+end
+
+-- Kiểm tra đạt yêu cầu
+local function meetsRequirements(passiveName, stats)
+    if not passiveName then return false end
+    if passiveName:lower() ~= Sniper.TargetPassive:lower() then
+        return false
+    end
+    if Sniper.MinDrop > 0 and (not stats.Drop or stats.Drop < Sniper.MinDrop) then
+        return false
+    end
+    if Sniper.MinLuck > 0 and (not stats.Luck or stats.Luck < Sniper.MinLuck) then
+        return false
+    end
+    if Sniper.MinDamage > 0 and (not stats.Damage or stats.Damage < Sniper.MinDamage) then
+        return false
+    end
+    return true
+end
+
+-- ======================== SNIPER LOOP ========================
+local function sniperLoop()
+    while Sniper.Running do
+        -- Tìm nút reroll nếu chưa có
+        if not Sniper.RerollButton then
+            Sniper.RerollButton = findRerollButton()
+            if not Sniper.RerollButton then
+                addLog("Không tìm thấy nút Reroll - kiểm tra lại giao diện")
+                task.wait(5)
+                continue
+            end
+        end
+        
+        -- Đọc text
+        local rawText = getDisplayedPassiveText()
+        local passiveName, stats = parsePassiveData(rawText)
+        
+        Sniper.RollCount = Sniper.RollCount + 1
+        local logMsg = string.format("Roll #%d: %s | Drop:%.1f Luck:%.1f Dmg:%.1f",
+            Sniper.RollCount,
+            passiveName or "???",
+            stats.Drop or 0,
+            stats.Luck or 0,
+            stats.Damage or 0
+        )
+        addLog(logMsg)
+        
+        -- Kiểm tra đạt yêu cầu
+        if meetsRequirements(passiveName, stats) then
+            addLog(">>> ĐÃ TÌM THẤY PASSIVE MONG MUỐN! <<<")
+            notify("THÀNH CÔNG!", string.format("%s - Drop:%.1f Luck:%.1f Dmg:%.1f", passiveName, stats.Drop or 0, stats.Luck or 0, stats.Damage or 0), 10)
+            Sniper.Running = false
+            Gui.StartButton.Text = "BẮT ĐẦU SNIPE"
+            -- Phát âm thanh
+            pcall(function()
+                local sound = Instance.new("Sound")
+                sound.SoundId = "rbxassetid://911310971"
+                sound.Parent = workspace
+                sound:Play()
+                task.wait(1)
+                sound:Destroy()
+            end)
+            break
+        end
+        
+        -- Click reroll
+        if Sniper.RerollButton then
+            clickButton(Sniper.RerollButton)
+        end
+        
+        task.wait(Sniper.RerollDelay)
+    end
+    
+    Sniper.RollCount = 0
+    Sniper.RerollButton = nil
+end
+
+-- ======================== GUI CREATION ========================
+local function createGUI()
+    -- ScreenGui
+    Gui.ScreenGui = Instance.new("ScreenGui")
+    Gui.ScreenGui.Name = "PassiveSniperGUI"
+    Gui.ScreenGui.Parent = Player:WaitForChild("PlayerGui")
+    Gui.ScreenGui.ResetOnSpawn = false
+    Gui.ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    
+    -- Main Frame (có thể kéo)
+    Gui.MainFrame = Instance.new("Frame")
+    Gui.MainFrame.Name = "MainFrame"
+    Gui.MainFrame.Size = UDim2.new(0, 320, 0, 420)
+    Gui.MainFrame.Position = UDim2.new(0.5, -160, 0.3, 0)
+    Gui.MainFrame.BackgroundColor3 = Color3.fromRGB(25, 25, 35)
+    Gui.MainFrame.BackgroundTransparency = 0.1
+    Gui.MainFrame.BorderSizePixel = 0
+    Gui.MainFrame.ClipsDescendants = true
+    Gui.MainFrame.Active = true
+    Gui.MainFrame.Draggable = true
+    Gui.MainFrame.Parent = Gui.ScreenGui
+    
+    -- Title Bar
+    local TitleBar = Instance.new("Frame")
+    TitleBar.Size = UDim2.new(1, 0, 0, 40)
+    TitleBar.BackgroundColor3 = Color3.fromRGB(40, 40, 55)
+    TitleBar.BorderSizePixel = 0
+    TitleBar.Parent = Gui.MainFrame
+    
+    local Title = Instance.new("TextLabel")
+    Title.Size = UDim2.new(1, -40, 1, 0)
+    Title.Position = UDim2.new(0, 10, 0, 0)
+    Title.BackgroundTransparency = 1
+    Title.Text = "⚔️ PASSIVE SNIPER ⚔️"
+    Title.TextColor3 = Color3.fromRGB(255, 220, 100)
+    Title.Font = Enum.Font.GothamBold
+    Title.TextSize = 18
+    Title.TextXAlignment = Enum.TextXAlignment.Left
+    Title.Parent = TitleBar
+    
+    local CloseButton = Instance.new("TextButton")
+    CloseButton.Size = UDim2.new(0, 30, 0, 30)
+    CloseButton.Position = UDim2.new(1, -35, 0, 5)
+    CloseButton.BackgroundColor3 = Color3.fromRGB(200, 50, 50)
+    CloseButton.Text = "X"
+    CloseButton.TextColor3 = Color3.new(1,1,1)
+    CloseButton.Font = Enum.Font.GothamBold
+    CloseButton.TextSize = 18
+    CloseButton.Parent = TitleBar
+    CloseButton.MouseButton1Click:Connect(function()
+        Gui.ScreenGui:Destroy()
+        Sniper.Running = false
+    end)
+    
+    -- Minimize Button
+    local MinimizeButton = Instance.new("TextButton")
+    MinimizeButton.Size = UDim2.new(0, 30, 0, 30)
+    MinimizeButton.Position = UDim2.new(1, -70, 0, 5)
+    MinimizeButton.BackgroundColor3 = Color3.fromRGB(100, 100, 150)
+    MinimizeButton.Text = "-"
+    MinimizeButton.TextColor3 = Color3.new(1,1,1)
+    MinimizeButton.Font = Enum.Font.GothamBold
+    MinimizeButton.TextSize = 20
+    MinimizeButton.Parent = TitleBar
+    MinimizeButton.MouseButton1Click:Connect(function()
+        Gui.MainFrame.Visible = not Gui.MainFrame.Visible
+        if Gui.ToggleButton then
+            Gui.ToggleButton.Visible = not Gui.MainFrame.Visible
+        end
+    end)
+    
+    -- Settings Section
+    local SettingsFrame = Instance.new("ScrollingFrame")
+    SettingsFrame.Size = UDim2.new(1, -10, 1, -50)
+    SettingsFrame.Position = UDim2.new(0, 5, 0, 45)
+    SettingsFrame.BackgroundTransparency = 1
+    SettingsFrame.BorderSizePixel = 0
+    SettingsFrame.CanvasSize = UDim2.new(0, 0, 0, 350)
+    SettingsFrame.ScrollBarThickness = 5
+    SettingsFrame.Parent = Gui.MainFrame
+    
+    local UIListLayout = Instance.new("UIListLayout")
+    UIListLayout.Padding = UDim.new(0, 8)
+    UIListLayout.SortOrder = Enum.SortOrder.LayoutOrder
+    UIListLayout.Parent = SettingsFrame
+    
+    local function addLabel(text, order)
+        local lbl = Instance.new("TextLabel")
+        lbl.Size = UDim2.new(1, -10, 0, 25)
+        lbl.BackgroundTransparency = 1
+        lbl.Text = text
+        lbl.TextColor3 = Color3.new(1,1,1)
+        lbl.Font = Enum.Font.GothamSemibold
+        lbl.TextSize = 14
+        lbl.TextXAlignment = Enum.TextXAlignment.Left
+        lbl.LayoutOrder = order
+        lbl.Parent = SettingsFrame
+        return lbl
+    end
+    
+    local function addTextBox(placeholder, default, order)
+        local box = Instance.new("TextBox")
+        box.Size = UDim2.new(1, -10, 0, 35)
+        box.BackgroundColor3 = Color3.fromRGB(50, 50, 60)
+        box.BorderSizePixel = 0
+        box.PlaceholderText = placeholder
+        box.Text = default
+        box.TextColor3 = Color3.new(1,1,1)
+        box.Font = Enum.Font.Gotham
+        box.TextSize = 14
+        box.ClearTextOnFocus = false
+        box.LayoutOrder = order
+        box.Parent = SettingsFrame
+        return box
+    end
+    
+    local function addNumberBox(placeholder, default, order)
+        local box = Instance.new("TextBox")
+        box.Size = UDim2.new(1, -10, 0, 35)
+        box.BackgroundColor3 = Color3.fromRGB(50, 50, 60)
+        box.BorderSizePixel = 0
+        box.PlaceholderText = placeholder
+        box.Text = tostring(default)
+        box.TextColor3 = Color3.new(1,1,1)
+        box.Font = Enum.Font.Gotham
+        box.TextSize = 14
+        box.ClearTextOnFocus = false
+        box.LayoutOrder = order
+        box.Parent = SettingsFrame
+        return box
+    end
+    
+    -- Tạo các input field
+    addLabel("🎯 TÊN PASSIVE MONG MUỐN:", 1)
+    Gui.PassiveNameBox = addTextBox("vd: Fortune Chosen", Sniper.TargetPassive, 2)
+    
+    addLabel("📊 NGƯỠNG TỐI THIỂU:", 3)
+    Gui.MinDropBox = addNumberBox("Min +1 Drop %", Sniper.MinDrop, 4)
+    Gui.MinLuckBox = addNumberBox("Min Luck %", Sniper.MinLuck, 5)
+    Gui.MinDamageBox = addNumberBox("Min Damage %", Sniper.MinDamage, 6)
+    
+    addLabel("⏱️ THỜI GIAN CHỜ (giây):", 7)
+    Gui.DelayBox = addNumberBox("Delay giữa các lần roll", Sniper.RerollDelay, 8)
+    
+    -- Buttons Frame
+    local ButtonFrame = Instance.new("Frame")
+    ButtonFrame.Size = UDim2.new(1, -10, 0, 40)
+    ButtonFrame.BackgroundTransparency = 1
+    ButtonFrame.LayoutOrder = 9
+    ButtonFrame.Parent = SettingsFrame
+    
+    local ButtonList = Instance.new("UIListLayout")
+    ButtonList.FillDirection = Enum.FillDirection.Horizontal
+    ButtonList.Padding = UDim.new(0, 5)
+    ButtonList.Parent = ButtonFrame
+    
+    -- Save Button
+    local SaveButton = Instance.new("TextButton")
+    SaveButton.Size = UDim2.new(0.48, 0, 1, 0)
+    SaveButton.BackgroundColor3 = Color3.fromRGB(60, 120, 200)
+    SaveButton.Text = "💾 LƯU CẤU HÌNH"
+    SaveButton.TextColor3 = Color3.new(1,1,1)
+    SaveButton.Font = Enum.Font.GothamBold
+    SaveButton.TextSize = 14
+    SaveButton.Parent = ButtonFrame
+    
+    -- Load Button
+    local LoadButton = Instance.new("TextButton")
+    LoadButton.Size = UDim2.new(0.48, 0, 1, 0)
+    LoadButton.BackgroundColor3 = Color3.fromRGB(60, 120, 200)
+    LoadButton.Text = "📂 TẢI CẤU HÌNH"
+    LoadButton.TextColor3 = Color3.new(1,1,1)
+    LoadButton.Font = Enum.Font.GothamBold
+    LoadButton.TextSize = 14
+    LoadButton.Parent = ButtonFrame
+    
+    -- Start/Stop Button
+    Gui.StartButton = Instance.new("TextButton")
+    Gui.StartButton.Size = UDim2.new(1, -10, 0, 40)
+    Gui.StartButton.BackgroundColor3 = Color3.fromRGB(34, 139, 34)
+    Gui.StartButton.Text = "▶ BẮT ĐẦU SNIPE"
+    Gui.StartButton.TextColor3 = Color3.new(1,1,1)
+    Gui.StartButton.Font = Enum.Font.GothamBold
+    Gui.StartButton.TextSize = 16
+    Gui.StartButton.LayoutOrder = 10
+    Gui.StartButton.Parent = SettingsFrame
+    
+    -- Log Label
+    addLabel("📋 NHẬT KÝ HOẠT ĐỘNG:", 11)
+    Gui.LogBox = Instance.new("TextBox")
+    Gui.LogBox.Size = UDim2.new(1, -10, 0, 120)
+    Gui.LogBox.BackgroundColor3 = Color3.fromRGB(30, 30, 40)
+    Gui.LogBox.BorderSizePixel = 0
+    Gui.LogBox.Text = ""
+    Gui.LogBox.TextColor3 = Color3.fromRGB(200, 200, 200)
+    Gui.LogBox.Font = Enum.Font.Code
+    Gui.LogBox.TextSize = 12
+    Gui.LogBox.ClearTextOnFocus = false
+    Gui.LogBox.TextXAlignment = Enum.TextXAlignment.Left
+    Gui.LogBox.TextYAlignment = Enum.TextYAlignment.Top
+    Gui.LogBox.MultiLine = true
+    Gui.LogBox.LayoutOrder = 12
+    Gui.LogBox.Parent = SettingsFrame
+    
+    -- Status Label
+    Gui.StatusLabel = Instance.new("TextLabel")
+    Gui.StatusLabel.Size = UDim2.new(1, -10, 0, 25)
+    Gui.StatusLabel.BackgroundTransparency = 1
+    Gui.StatusLabel.Text = "⚪ Sẵn sàng"
+    Gui.StatusLabel.TextColor3 = Color3.fromRGB(100, 255, 100)
+    Gui.StatusLabel.Font = Enum.Font.Gotham
+    Gui.StatusLabel.TextSize = 13
+    Gui.StatusLabel.LayoutOrder = 13
+    Gui.StatusLabel.Parent = SettingsFrame
+    
+    -- Toggle Button khi minimize
+    Gui.ToggleButton = Instance.new("ImageButton")
+    Gui.ToggleButton.Size = UDim2.new(0, 50, 0, 50)
+    Gui.ToggleButton.Position = UDim2.new(1, -60, 0, 10)
+    Gui.ToggleButton.BackgroundColor3 = Color3.fromRGB(40,40,55)
+    Gui.ToggleButton.Image = "rbxassetid://12173051863" -- icon sword
+    Gui.ToggleButton.Visible = false
+    Gui.ToggleButton.Parent = Gui.ScreenGui
+    Gui.ToggleButton.MouseButton1Click:Connect(function()
+        Gui.MainFrame.Visible = true
+        Gui.ToggleButton.Visible = false
+    end)
+    
+    -- ======================== EVENTS ========================
+    local function loadSettings()
+        local success, data = pcall(function()
+            return HttpService:JSONDecode(readfile("SniperSettings.json"))
+        end)
+        if success and data then
+            Gui.PassiveNameBox.Text = data.TargetPassive or "Fortune Chosen"
+            Gui.MinDropBox.Text = tostring(data.MinDrop or 17.5)
+            Gui.MinLuckBox.Text = tostring(data.MinLuck or 5.0)
+            Gui.MinDamageBox.Text = tostring(data.MinDamage or 5.0)
+            Gui.DelayBox.Text = tostring(data.RerollDelay or 3.5)
+            addLog("Đã tải cấu hình lưu trước đó")
+        else
+            addLog("Không tìm thấy file cấu hình")
+        end
+    end
+    
+    local function saveSettings()
+        local data = {
+            TargetPassive = Gui.PassiveNameBox.Text,
+            MinDrop = tonumber(Gui.MinDropBox.Text) or 17.5,
+            MinLuck = tonumber(Gui.MinLuckBox.Text) or 5.0,
+            MinDamage = tonumber(Gui.MinDamageBox.Text) or 5.0,
+            RerollDelay = tonumber(Gui.DelayBox.Text) or 3.5
+        }
+        pcall(function()
+            writefile("SniperSettings.json", HttpService:JSONEncode(data))
+            addLog("Đã lưu cấu hình")
+        end)
+    end
+    
+    SaveButton.MouseButton1Click:Connect(saveSettings)
+    LoadButton.MouseButton1Click:Connect(loadSettings)
+    
+    Gui.StartButton.MouseButton1Click:Connect(function()
+        if Sniper.Running then
+            Sniper.Running = false
+            Gui.StartButton.Text = "▶ BẮT ĐẦU SNIPE"
+            Gui.StatusLabel.Text = "⏸️ Đã dừng"
+            Gui.StatusLabel.TextColor3 = Color3.fromRGB(255, 150, 0)
+            addLog("Dừng snipe")
+        else
+            -- Cập nhật config từ GUI
+            Sniper.TargetPassive = Gui.PassiveNameBox.Text
+            Sniper.MinDrop = tonumber(Gui.MinDropBox.Text) or 17.5
+            Sniper.MinLuck = tonumber(Gui.MinLuckBox.Text) or 5.0
+            Sniper.MinDamage = tonumber(Gui.MinDamageBox.Text) or 5.0
+            Sniper.RerollDelay = tonumber(Gui.DelayBox.Text) or 3.5
+            Sniper.Running = true
+            Gui.StartButton.Text = "⏸️ DỪNG SNIPE"
+            Gui.StatusLabel.Text = "🔄 Đang chạy..."
+            Gui.StatusLabel.TextColor3 = Color3.fromRGB(0, 255, 0)
+            addLog("Bắt đầu snipe: " .. Sniper.TargetPassive)
+            -- Chạy loop trong coroutine
+            coroutine.wrap(sniperLoop)()
+        end
+    end)
+    
+    -- Tự động load settings khi khởi tạo
+    task.spawn(loadSettings)
+    
+    addLog("GUI đã sẵn sàng. Cấu hình và nhấn BẮT ĐẦU.")
+end
+
+-- ======================== MAIN ========================
+if not game:IsLoaded() then
+    game.Loaded:Wait()
+end
+
+task.wait(1) -- Chờ giao diện game load
+
+createGUI()
+notify("Passive Sniper", "GUI đã được tải! Nhấp vào biểu tượng để mở.", 5)
