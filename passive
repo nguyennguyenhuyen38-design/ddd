@@ -1,93 +1,88 @@
 --[[
   SAILOR PIECE - AUTO TRADE
-  Huong dan su dung:
-  1. Nhan nut toggle <> de mo/tat menu
-  2. Chon player tu danh sach hoac nhan F10
-  3. Nhan "Quet" de lay inventory
-  4. Click chon items trong menu de toggle chon
-  5. Nhan "Trade" de gui trade + add items
-  6. Tu bam Accept
-
-  Dac diem:
-  - Full GUI trong game, khong can Discord de chon item
-  - Click item trong menu de toggle chon / bo chon
-  - Shift+Click de chon nhieu lien tiep
-  - Tang/giam so luong item bang nut +/-
+  Nut <> ben goc trai = bat/tat menu
+  Khong can F11 / F10
 ]]
 
 -- ===================== SERVICES =====================
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local HttpService = game:GetService("HttpService")
-local UserInputService = game:GetService("UserInputService")
 local TweenService = game:GetService("TweenService")
 local LocalPlayer = Players.LocalPlayer
 
--- ===================== CONSTANTS =====================
+-- ===================== CONFIG =====================
 local WEBHOOK_URL = "https://discord.com/api/webhooks/1448927972068167832/9DibtGcZHL_yhSpJtyLh_tmRdm5kLHluAcWzk8YGkfN2d4OtF9DzDD_dRlEvLRbYPWTb"
-local ACCENT = Color3.fromRGB(85, 170, 255)
-local GREEN = Color3.fromRGB(85, 255, 85)
-local RED = Color3.fromRGB(255, 80, 80)
-local YELLOW = Color3.fromRGB(255, 200, 0)
-local BG = Color3.fromRGB(16, 16, 26)
-local BG2 = Color3.fromRGB(26, 26, 40)
-local BG3 = Color3.fromRGB(36, 36, 55)
-local TEXT = Color3.fromRGB(210, 210, 230)
-local TEXT_DIM = Color3.fromRGB(120, 120, 150)
+
+-- ===================== COLORS =====================
+local C = {
+    bg = Color3.fromRGB(16, 16, 26),
+    bg2 = Color3.fromRGB(26, 26, 40),
+    bg3 = Color3.fromRGB(38, 38, 58),
+    accent = Color3.fromRGB(85, 170, 255),
+    green = Color3.fromRGB(85, 255, 85),
+    red = Color3.fromRGB(255, 70, 70),
+    yellow = Color3.fromRGB(255, 200, 0),
+    text = Color3.fromRGB(210, 210, 230),
+    dim = Color3.fromRGB(110, 110, 140),
+}
 
 -- ===================== STATE =====================
-local UI = nil
+local ToggleUI = nil
+local MainUI = nil
 local PlayerSelUI = nil
-local ToggleBtn = nil
-local MenuVisible = false
-local TradeItems = {} -- {name, qty, selected}
+local MenuOpen = false
+local Inventory = {}
 local TargetPlayer = nil
-local TradeOpen = false
-local Stats = {trades_sent = 0, items_added = 0, total_value = 0}
+local Stats = {trades = 0, added = 0}
+local WebhookOK = nil
 
 -- ===================== LOG =====================
 local function Log(msg)
-    print("[Trade] " .. os.date("%H:%M:%S") .. " " .. msg)
-end
-local function LogErr(msg)
-    warn("[Trade ERR] " .. os.date("%H:%M:%S") .. " " .. msg)
-end
-local function LogOk(msg)
-    print("[Trade OK] " .. os.date("%H:%M:%S") .. " " .. msg)
+    print("[Trade] " .. os.date("%H:%M:%S") .. " | " .. msg)
 end
 
--- ===================== UTILS =====================
+-- ===================== HELPERS =====================
+local function Corner(parent, r)
+    local c = Instance.new("UICorner")
+    c.CornerRadius = UDim.new(0, r or 8)
+    c.Parent = parent
+    return c
+end
+
+local function Stroke(parent, color, thick)
+    local s = Instance.new("UIStroke")
+    s.Color = color or C.bg3
+    s.Thickness = thick or 1
+    s.Parent = parent
+    return s
+end
+
+local function Txt(parent, props)
+    local t = Instance.new("TextLabel")
+    for k, v in pairs(props) do t[k] = v end
+    t.Parent = parent
+    return t
+end
+
+local function Btn(parent, props)
+    local b = Instance.new("TextButton")
+    for k, v in pairs(props) do b[k] = v end
+    b.AutoButtonColor = false
+    Corner(b, 8)
+    b.Parent = parent
+    return b
+end
+
+local function Frame(parent, props)
+    local f = Instance.new("Frame")
+    for k, v in pairs(props) do f[k] = v end
+    f.Parent = parent
+    return f
+end
+
 local function SetText(obj, txt)
-    if obj and obj.Parent then
-        pcall(function() obj.Text = txt end)
-    end
-end
-
-local function RarityColor(r)
-    r = string.lower(r or "")
-    if r:find("legend") or r:find("mythic") then return Color3.fromRGB(255, 180, 0)
-    elseif r:find("epic") then return Color3.fromRGB(180, 80, 255)
-    elseif r:find("rare") then return Color3.fromRGB(80, 160, 255)
-    elseif r:find("uncommon") then return Color3.fromRGB(80, 200, 80)
-    else return Color3.fromRGB(160, 160, 180) end
-end
-
-local function RarityFromName(name)
-    local n = string.lower(name)
-    if n:find("legend") or n:find("mythic") then return "Legendary", 5
-    elseif n:find("epic") then return "Epic", 4
-    elseif n:find("rare") then return "Rare", 3
-    elseif n:find("uncommon") then return "Uncommon", 2
-    else return "Common", 1 end
-end
-
-local function ValueFromName(name)
-    local n = string.lower(name)
-    if n:find("legend") or n:find("mythic") then return 10000
-    elseif n:find("epic") then return 5000
-    elseif n:find("rare") then return 1000
-    elseif n:find("uncommon") then return 500
-    else return 100 end
+    if obj and obj.Parent then pcall(function() obj.Text = txt end) end
 end
 
 local function FormatVal(v)
@@ -97,726 +92,593 @@ local function FormatVal(v)
     else return tostring(v) end
 end
 
--- ===================== DISCORD =====================
-local function SendDiscord(title, desc, color)
+local function Rarity(name)
+    local n = string.lower(name)
+    if n:find("legend") or n:find("mythic") then return "Legendary", 5, C.yellow
+    elseif n:find("epic") then return "Epic", 4, Color3.fromRGB(180, 80, 255)
+    elseif n:find("rare") then return "Rare", 3, C.accent
+    elseif n:find("uncommon") then return "Uncommon", 2, C.green
+    else return "Common", 1, C.dim end
+end
+
+local function ItemValue(name)
+    local n = string.lower(name)
+    if n:find("legend") or n:find("mythic") then return 10000
+    elseif n:find("epic") then return 5000
+    elseif n:find("rare") then return 1000
+    elseif n:find("uncommon") then return 500
+    else return 100 end
+end
+
+-- ===================== WEBHOOK =====================
+local function TestWebhook()
+    WebhookOK = nil
     pcall(function()
-        local embed = {
-            {
-                title = title,
-                description = desc,
-                color = color or 0x55AAFF,
+        local body = HttpService:JSONEncode({
+            embeds = {{
+                title = "AutoTrade - Online",
+                description = "Script da khoi dong thanh cong!\n**Player:** " .. LocalPlayer.Name .. "\n**Time:** " .. os.date("%d/%m/%Y %H:%M:%S"),
+                color = 0x55FF55,
                 footer = {text = "Sailor Piece AutoTrade"},
                 timestamp = DateTime.now():ToIsoString()
-            }
-        }
-        local body = HttpService:JSONEncode({embeds = embed})
-        HttpService:RequestAsync({
+            }}
+        })
+        local res = HttpService:RequestAsync({
             Url = WEBHOOK_URL,
             Method = "POST",
             Headers = {["Content-Type"] = "application/json"},
             Body = body
         })
+        WebhookOK = res and res.Success
+        Log("Webhook test: " .. (WebhookOK and "OK" or "LOI"))
     end)
 end
 
-local function SendTestDiscord()
-    SendDiscord("AutoTrade - Online", "Script da khoi dong thanh cong!\n**Player:** " .. LocalPlayer.Name .. "\n**Time:** " .. os.date("%d/%m/%Y %H:%M:%S"), 0x55FF55)
+local function SendWebhook(title, desc, color)
+    pcall(function()
+        local body = HttpService:JSONEncode({
+            embeds = {{
+                title = title,
+                description = desc,
+                color = color or 0x55AAFF,
+                footer = {text = "Sailor Piece AutoTrade"},
+                timestamp = DateTime.now():ToIsoString()
+            }}
+        })
+        local res = HttpService:RequestAsync({
+            Url = WEBHOOK_URL,
+            Method = "POST",
+            Headers = {["Content-Type"] = "application/json"},
+            Body = body
+        })
+        if res and res.Success then
+            Log("Webhook gui thanh cong")
+        else
+            Log("Webhook loi: " .. tostring(res and res.StatusCode))
+        end
+    end)
 end
 
 -- ===================== INVENTORY SCANNER =====================
 local function ScanInventory()
-    TradeItems = {}
+    Inventory = {}
     Log("Bat dau quet inventory...")
 
-    local found = {}
-
-    -- THU 1: Tim inventory GUI trong PlayerGui
-    local function searchGui(gui, depth)
-        if depth > 4 then return end
-        pcall(function()
-            for _, c in pairs(gui:GetChildren()) do
-                pcall(function()
-                    local cn = string.lower(c.Name)
-                    local isContainer = false
-
-                    if c:IsA("ScrollingFrame") or c:IsA("Frame") then
-                        if cn:find("inv") or cn:find("item") or cn:find("slot") or cn:find("backpack") or cn:find("bag") then
-                            isContainer = true
-                        end
-                    end
-
-                    -- Lay text tu TextLabel/TextButton
-                    if c:IsA("TextLabel") or c:IsA("TextButton") then
-                        local txt = c.Text
-                        if txt and type(txt) == "string" and #txt > 1 and #txt < 60 and not txt:match("^[%s%d%:,%.%-%+]+$") then
-                            local clean = txt:gsub("[^%w%s%-_']", ""):gsub("%s+", " "):match("^%s*(.-)%s*$")
-                            if #clean > 2 then
-                                found[clean] = true
-                            end
-                        end
-                    end
-
-                    -- Lay name tu ImageLabel/ImageButton
-                    if c:IsA("ImageLabel") or c:IsA("ImageButton") then
-                        local nm = c.Name
-                        if nm and type(nm) == "string" and #nm > 2 and #nm < 60 and not nm:match("^[%s%d]+$") and not nm:match("^rbx") then
-                            found[nm] = true
-                        end
-                    end
-
-                    -- De quy tiep
-                    if isContainer or depth < 2 then
-                        searchGui(c, depth + 1)
-                    end
-                end)
-            end
-        end)
-    end
-
-    -- Tim tat ca GUI
-    for _, gui in pairs(LocalPlayer.PlayerGui:GetChildren()) do
-        if gui:IsA("ScreenGui") then
-            pcall(function() searchGui(gui, 0) end)
-        end
-    end
-
-    -- Tim trong ReplicatedStorage / Character
-    if LocalPlayer.Character then
-        pcall(function() searchGui(LocalPlayer.Character, 0) end)
-    end
-
-    for name in pairs(found) do
-        local rarity, tier = RarityFromName(name)
-        local value = ValueFromName(name)
-        table.insert(TradeItems, {name = name, qty = 1, selected = false, rarity = rarity, tier = tier, value = value})
-    end
-
-    -- Sort theo rarity va name
-    table.sort(TradeItems, function(a, b)
-        if a.tier ~= b.tier then return a.tier > b.tier end
-        return a.name < b.name
-    end)
-
-    LogOk("Quet xong - Tim thay " .. #TradeItems .. " items")
-    return TradeItems
-end
-
--- ===================== TRADE SYSTEM =====================
-local function FindTradeRemote()
+    -- Tim inventory data trong game
     local candidates = {}
-    for _, obj in pairs(ReplicatedStorage:GetChildren()) do
+
+    -- 1. Tim trong ReplicatedStorage
+    for _, obj in pairs(ReplicatedStorage:GetDescendants()) do
+        if obj:IsA("Folder") or obj:IsA("ModuleScript") then
+            local n = string.lower(obj.Name)
+            if n:find("inventory") or n:find("item") or n:find("backpack") then
+                table.insert(candidates, obj)
+            end
+        end
         if obj:IsA("RemoteEvent") or obj:IsA("RemoteFunction") then
             local n = string.lower(obj.Name)
-            if n:find("trade") then
+            if n:find("inventory") or n:find("item") or n:find("backpack") then
                 table.insert(candidates, obj)
             end
         end
     end
-    if #candidates > 0 then
-        -- Tim cai phu hop nhat
-        for _, c in ipairs(candidates) do
-            local n = string.lower(c.Name)
-            if n == "trade" or n == "traderemote" or n == "sendtrade" or n:find("tradereq") then
-                return c
+
+    -- 2. Tim trong Workspace
+    for _, obj in pairs(workspace:GetDescendants()) do
+        if obj:IsA("Folder") or obj:IsA("ModuleScript") then
+            local n = string.lower(obj.Name)
+            if n:find("inventory") or n:find("item") or n:find("backpack") then
+                table.insert(candidates, obj)
             end
         end
-        return candidates[1]
-    end
-    return nil
-end
-
-local function SendTradeToPlayer(player)
-    if not player then LogErr("Chua chon player"); return false end
-    Log("Dang gui trade toi: " .. player.Name)
-
-    local remote = FindTradeRemote()
-    if remote then
-        Log("Tim thay remote: " .. remote.Name)
-        pcall(function()
-            if remote:IsA("RemoteFunction") then
-                pcall(function() remote:CallServerAsync(player) end)
-            else
-                pcall(function() remote:FireServer(player) end)
-            end
-        end)
-    else
-        Log("Khong tim remote - thu tim nut Trade trong GUI")
     end
 
-    Stats.trades_sent = Stats.trades_sent + 1
-    return true
-end
-
-local function AddItemsInTradeGui()
-    local addedCount = 0
-    local totalValue = 0
-    TradeOpen = false
-
+    -- 3. Tim trong Player
     pcall(function()
-        -- Doi trade GUI xuat hien
-        for i = 1, 20 do
-            task.wait(0.3)
-            for _, gui in pairs(LocalPlayer.PlayerGui:GetChildren()) do
-                if gui:IsA("ScreenGui") then
-                    local gn = string.lower(gui.Name)
-                    if gn:find("trade") then
-                        TradeOpen = true
-                        -- Tim item slots trong trade GUI
-                        for _, obj in pairs(gui:GetDescendants()) do
-                            if obj:IsA("TextButton") or obj:IsA("ImageButton") then
-                                local txt = obj.Text or ""
-                                local nm = obj.Name or ""
-                                for _, item in ipairs(TradeItems) do
-                                    if item.selected and item.qty > 0 then
-                                        local lowTxt = string.lower(txt)
-                                        local lowNm = string.lower(nm)
-                                        local lowItem = string.lower(item.name)
-                                        if lowTxt:find(lowItem, 1, true) or lowNm:find(lowItem, 1, true) then
-                                            pcall(function() firesignal(obj.MouseButton1Click) end)
-                                            task.wait(0.1)
-                                            addedCount = addedCount + 1
-                                            totalValue = totalValue + item.value
-                                            break
-                                        end
-                                    end
-                                end
-                            end
+        local inv = LocalPlayer:FindFirstChild("Inventory")
+            or LocalPlayer:FindFirstChild("Backpack")
+            or LocalPlayer:FindFirstChild("Items")
+            or LocalPlayer:FindFirstChild("Data")
+        if inv then
+            table.insert(candidates, inv)
+            Log("Tim thay folder: " .. inv.Name)
+        end
+    end)
+
+    -- Doc du lieu tu cac candidate
+    for _, cand in ipairs(candidates) do
+        pcall(function()
+            -- Doc tung child cua candidate
+            for _, child in pairs(cand:GetChildren()) do
+                local name = child.Name
+                if name and #name > 1 and #name < 50 and not name:match("^[%s%d]+$") then
+                    local rarity, tier = Rarity(name)
+                    local value = ItemValue(name)
+                    table.insert(Inventory, {
+                        name = name,
+                        rarity = rarity,
+                        tier = tier,
+                        value = value,
+                        selected = false,
+                        qty = 1
+                    })
+                end
+                -- Neu la folder, doc tiep
+                if child:IsA("Folder") then
+                    for _, sub in pairs(child:GetChildren()) do
+                        local nm = sub.Name
+                        if nm and #nm > 1 and #nm < 50 and not nm:match("^[%s%d]+$") then
+                            local rarity, tier = Rarity(nm)
+                            local value = ItemValue(nm)
+                            table.insert(Inventory, {
+                                name = nm,
+                                rarity = rarity,
+                                tier = tier,
+                                value = value,
+                                selected = false,
+                                qty = 1
+                            })
                         end
-                        break
                     end
                 end
             end
-            if TradeOpen then break end
+        end)
+    end
+
+    -- 4. Doc tu GetPlayers (neu co RemoteFunction)
+    pcall(function()
+        local remotes = ReplicatedStorage:GetChildren()
+        for _, r in pairs(remotes) do
+            if r:IsA("RemoteFunction") then
+                local n = string.lower(r.Name)
+                if n:find("get") and (n:find("inv") or n:find("item") or n:find("player")) then
+                    local ok, result = pcall(function()
+                        return r:CallServerAsync()
+                    end)
+                    if ok and result then
+                        Log("Remote tra ve: " .. type(result))
+                    end
+                end
+            end
         end
     end)
 
-    if addedCount > 0 then
-        Stats.items_added = Stats.items_added + addedCount
-        Stats.total_value = Stats.total_value + totalValue
-        LogOk("Da add " .. addedCount .. " items (gia tri: " .. FormatVal(totalValue) .. ")")
-    else
-        LogErr("Khong add duoc item nao - hay mo trade GUI truoc")
+    -- Xoa trung lap
+    local seen = {}
+    local unique = {}
+    for _, item in ipairs(Inventory) do
+        local key = string.lower(item.name)
+        if not seen[key] then
+            seen[key] = true
+            table.insert(unique, item)
+        end
     end
+    Inventory = unique
 
-    return addedCount
-end
-
--- ===================== GUI BUILDING HELPERS =====================
-local function MakeCorner(parent, radius)
-    local c = Instance.new("UICorner")
-    c.CornerRadius = UDim.new(0, radius or 8)
-    c.Parent = parent
-    return c
-end
-
-local function MakeStroke(parent, color)
-    local s = Instance.new("UIStroke")
-    s.Color = color or BG3
-    s.Thickness = 1
-    s.Parent = parent
-    return s
-end
-
-local function MakeLabel(parent, props)
-    local l = Instance.new("TextLabel")
-    for k, v in pairs(props) do l[k] = v end
-    l.Parent = parent
-    return l
-end
-
-local function MakeBtn(parent, props)
-    local b = Instance.new("TextButton")
-    for k, v in pairs(props) do b[k] = v end
-    MakeCorner(b, 8)
-    b.AutoButtonColor = true
-    return b
-end
-
-local function SlideIn(frame, fromRight)
-    pcall(function()
-        local start = fromRight and UDim2.new(1, 50, 0.5, -200) or UDim2.new(0, -50, 0.5, -200)
-        frame.Position = start
-        frame.Size = UDim2.new(0, 400, 0, 420)
-        frame.Visible = true
-        local t = TweenService:Create(frame, TweenInfo.new(0.3, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
-            Position = UDim2.new(0, 20, 0.5, -210),
-            Size = UDim2.new(0, 400, 0, 420)
-        })
-        t:Play()
+    -- Sort theo rarity
+    table.sort(Inventory, function(a, b)
+        if a.tier ~= b.tier then return a.tier > b.tier end
+        return a.name < b.name
     end)
+
+    Log("Quet xong - " .. #Inventory .. " items")
+    return Inventory
 end
 
-local function SlideOut(frame, cb)
-    pcall(function()
-        local t = TweenService:Create(frame, TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
-            Position = UDim2.new(0, -50, 0.5, -210),
-            Transparency = 1
-        })
-        t:Play()
-        t.Completed:Connect(function()
-            pcall(function() frame:Destroy() end)
-            if cb then cb() end
-        end)
-    end)
-end
-
--- ===================== ITEM LIST RENDERER =====================
-local function RenderItemList(parentFrame)
-    -- Xoa list cu
-    for _, c in pairs(parentFrame:GetChildren()) do
-        if c:IsA("Frame") then pcall(function() c:Destroy() end) end
+-- ===================== RENDER ITEM LIST =====================
+local function RenderItems(scrollFrame, refreshFn)
+    -- Xoa het child cu
+    for _, c in pairs(scrollFrame:GetChildren()) do
+        if c:IsA("Frame") or c:IsA("TextLabel") or c:IsA("TextButton") then
+            pcall(function() c:Destroy() end)
+        end
     end
 
     local ly = Instance.new("UIListLayout")
     ly.SortOrder = Enum.SortOrder.LayoutOrder
-    ly.Padding = UDim.new(0, 4)
-    ly.Parent = parentFrame
+    ly.Padding = UDim.new(0, 3)
+    ly.Parent = scrollFrame
 
-    local scroll = Instance.new("ScrollingFrame")
-    scroll.Size = UDim2.new(1, 0, 1, 0)
-    scroll.BackgroundTransparency = 1
-    scroll.ScrollBarThickness = 4
-    scroll.ScrollBarImageColor3 = ACCENT
-    scroll.CanvasSize = UDim2.new(0, 0, 0, 0)
-    scroll.Parent = parentFrame
-
-    local sl = Instance.new("UIListLayout")
-    sl.SortOrder = Enum.SortOrder.LayoutOrder
-    sl.Padding = UDim.new(0, 4)
-    sl.Parent = scroll
-
-    scroll:GetPropertyChangedSignal("CanvasSize"):Connect(function()
-        pcall(function()
-            sl:FindFirstChildOfClass("UISizeConstraint")
-        end)
-    end)
-
-    if #TradeItems == 0 then
-        local empty = MakeLabel(scroll, {
+    if #Inventory == 0 then
+        Txt(scrollFrame, {
             Size = UDim2.new(1, 0, 0, 80),
             BackgroundTransparency = 1,
-            Text = "Chua co item nao.\nNhan 'Quet' de quet inventory.",
-            TextColor3 = TEXT_DIM,
+            Text = "Chua co item nao.\n\nNhan nut [QUET] ben duoi\nde tim items trong game.",
+            TextColor3 = C.dim,
             TextSize = 11,
             Font = Enum.Font.Gotham,
+            TextYAlignment = Enum.TextYAlignment.Center,
             LayoutOrder = 0
         })
+        scrollFrame.CanvasSize = UDim2.new(0, 0, 0, 100)
         return
     end
 
-    local selectedCount = 0
-    local selectedValue = 0
-    for _, item in ipairs(TradeItems) do
-        if item.selected then
-            selectedCount = selectedCount + item.qty
-            selectedValue = selectedValue + item.value * item.qty
-        end
-    end
-
-    for i, item in ipairs(TradeItems) do
-        local isSelected = item.selected
-        local rColor = RarityColor(item.rarity)
-
-        local row = Instance.new("Frame")
-        row.Name = "Item_" .. i
-        row.Size = UDim2.new(1, 0, 0, 44)
-        row.BackgroundColor3 = isSelected and Color3.fromRGB(30, 55, 35) or (i % 2 == 0 and BG3 or BG2)
-        row.BorderSizePixel = 0
-        row.LayoutOrder = i
-        MakeCorner(row, 6)
-        if isSelected then MakeStroke(row, Color3.fromRGB(60, 120, 60)) end
-        row.Parent = scroll
+    for i, item in ipairs(Inventory) do
+        local sel = item.selected
+        local row = Frame(scrollFrame, {
+            Size = UDim2.new(1, 0, 0, 48),
+            BackgroundColor3 = sel and Color3.fromRGB(25, 50, 30) or (i % 2 == 0 and C.bg3 or C.bg2),
+            BorderSizePixel = 0,
+            LayoutOrder = i
+        })
+        Corner(row, 6)
+        if sel then Stroke(row, C.green, 1) end
 
         -- Checkbox
-        local cb = Instance.new("TextButton")
-        cb.Name = "CheckBox"
-        cb.Size = UDim2.new(0, 28, 0, 28)
-        cb.Position = UDim2.new(0, 5, 0.5, -14)
-        cb.BackgroundColor3 = isSelected and Color3.fromRGB(60, 160, 60) or BG3
-        cb.Text = isSelected and "✓" or ""
-        cb.TextColor3 = Color3.fromRGB(255, 255, 255)
-        cb.TextSize = 16
-        cb.Font = Enum.Font.GothamBold
-        cb.BorderSizePixel = 0
-        cb.Parent = row
-        MakeCorner(cb, 6)
-
+        local cb = Btn(row, {
+            Size = UDim2.new(0, 32, 0, 32),
+            Position = UDim2.new(0, 6, 0.5, -16),
+            BackgroundColor3 = sel and Color3.fromRGB(50, 150, 50) or C.bg3,
+            Text = sel and "Y" or "",
+            TextColor3 = Color3.fromRGB(255, 255, 255),
+            TextSize = 14,
+            Font = Enum.Font.GothamBold
+        })
+        Corner(cb, 6)
         cb.MouseButton1Click:Connect(function()
             item.selected = not item.selected
             if item.selected then item.qty = 1 end
-            RenderItemList(parentFrame)
-            RefreshSummary()
+            RenderItems(scrollFrame, refreshFn)
+            if refreshFn then refreshFn() end
         end)
 
-        -- Item name
-        local nameLbl = Instance.new("TextLabel")
-        nameLbl.Name = "Name"
-        nameLbl.Size = UDim2.new(1, -120, 0, 18)
-        nameLbl.Position = UDim2.new(0, 38, 0, 5)
-        nameLbl.BackgroundTransparency = 1
-        nameLbl.Text = item.name
-        nameLbl.TextColor3 = isSelected and Color3.fromRGB(255, 255, 255) or rColor
-        nameLbl.TextSize = 11
-        nameLbl.Font = Enum.Font.GothamBold
-        nameLbl.TextXAlignment = Enum.TextXAlignment.Left
-        nameLbl.TextTruncate = Enum.TextTruncate.AtEnd
-        nameLbl.Parent = row
-
-        -- Rarity + value
-        local infoLbl = Instance.new("TextLabel")
-        infoLbl.Name = "Info"
-        infoLbl.Size = UDim2.new(1, -120, 0, 14)
-        infoLbl.Position = UDim2.new(0, 38, 0, 23)
-        infoLbl.BackgroundTransparency = 1
-        infoLbl.Text = item.rarity .. "  |  " .. FormatVal(item.value)
-        infoLbl.TextColor3 = TEXT_DIM
-        infoLbl.TextSize = 9
-        infoLbl.Font = Enum.Font.Gotham
-        infoLbl.TextXAlignment = Enum.TextXAlignment.Left
-        infoLbl.Parent = row
-
-        -- Qty controls
-        local qtyFrame = Instance.new("Frame")
-        qtyFrame.Size = UDim2.new(0, 70, 0, 24)
-        qtyFrame.Position = UDim2.new(1, -75, 0.5, -12)
-        qtyFrame.BackgroundTransparency = 1
-        qtyFrame.Parent = row
-
-        local decBtn = MakeBtn(qtyFrame, {
-            Size = UDim2.new(0, 22, 1, 0),
-            BackgroundColor3 = BG3,
-            Text = "-",
-            TextColor3 = isSelected and TEXT or TEXT_DIM,
-            TextSize = 14,
+        -- Name + rarity
+        local rColor = Rarity(item.name)
+        Txt(row, {
+            Size = UDim2.new(1, -140, 0, 20),
+            Position = UDim2.new(0, 44, 0, 5),
+            BackgroundTransparency = 1,
+            Text = item.name,
+            TextColor3 = sel and Color3.fromRGB(255, 255, 255) or rColor,
+            TextSize = 11,
             Font = Enum.Font.GothamBold,
-            Position = UDim2.new(0, 0, 0, 0)
+            TextXAlignment = Enum.TextXAlignment.Left,
+            TextTruncate = Enum.TextTruncate.AtEnd
         })
-        MakeCorner(decBtn, 4)
+        Txt(row, {
+            Size = UDim2.new(1, -140, 0, 14),
+            Position = UDim2.new(0, 44, 0, 25),
+            BackgroundTransparency = 1,
+            Text = item.rarity .. " | " .. FormatVal(item.value),
+            TextColor3 = C.dim,
+            TextSize = 9,
+            Font = Enum.Font.Gotham,
+            TextXAlignment = Enum.TextXAlignment.Left
+        })
 
-        local decClick = false
-        decBtn.MouseButton1Click:Connect(function()
-            if item.selected and item.qty > 1 then
+        -- Qty +/-
+        local qf = Frame(row, {
+            Size = UDim2.new(0, 80, 0, 28),
+            Position = UDim2.new(1, -86, 0.5, -14),
+            BackgroundTransparency = 1
+        })
+
+        local function qtyBtn(txt, onClick)
+            local b = Btn(qf, {
+                Size = UDim2.new(0, 24, 1, 0),
+                BackgroundColor3 = C.bg3,
+                Text = txt,
+                TextColor3 = sel and C.text or C.dim,
+                TextSize = 14,
+                Font = Enum.Font.GothamBold
+            })
+            Corner(b, 4)
+            b.MouseButton1Click:Connect(onClick)
+            return b
+        end
+
+        qtyBtn("-", function()
+            if sel and item.qty > 1 then
                 item.qty = item.qty - 1
-                RenderItemList(parentFrame)
-                RefreshSummary()
+                RenderItems(scrollFrame, refreshFn)
+                if refreshFn then refreshFn() end
             end
         end)
 
-        local qtyLbl = MakeLabel(qtyFrame, {
-            Size = UDim2.new(0, 26, 1, 0),
-            Position = UDim2.new(0, 22, 0, 0),
-            BackgroundColor3 = BG3,
+        local ql = Txt(qf, {
+            Size = UDim2.new(0, 32, 1, 0),
+            Position = UDim2.new(0, 24, 0, 0),
+            BackgroundColor3 = C.bg3,
             Text = "x" .. item.qty,
-            TextColor3 = isSelected and ACCENT or TEXT_DIM,
+            TextColor3 = sel and C.accent or C.dim,
             TextSize = 11,
             Font = Enum.Font.GothamBold
         })
-        MakeCorner(qtyLbl, 4)
+        Corner(ql, 4)
 
-        local incBtn = MakeBtn(qtyFrame, {
-            Size = UDim2.new(0, 22, 1, 0),
-            Position = UDim2.new(1, -22, 0, 0),
-            BackgroundColor3 = BG3,
-            Text = "+",
-            TextColor3 = isSelected and TEXT or TEXT_DIM,
-            TextSize = 14,
-            Font = Enum.Font.GothamBold
-        })
-        MakeCorner(incBtn, 4)
-
-        incBtn.MouseButton1Click:Connect(function()
-            if item.selected then
+        qtyBtn("+", function()
+            if sel then
                 item.qty = item.qty + 1
-                RenderItemList(parentFrame)
-                RefreshSummary()
+                RenderItems(scrollFrame, refreshFn)
+                if refreshFn then refreshFn() end
             end
         end)
     end
 
-    -- Set canvas size
-    scroll.CanvasSize = UDim2.new(0, 0, 0, math.max(#TradeItems * 48 + 10, 200))
+    scrollFrame.CanvasSize = UDim2.new(0, 0, 0, math.max(#Inventory * 51 + 10, 120))
 end
 
 -- ===================== MAIN UI =====================
 local function CreateMainUI()
-    if UI then pcall(function() UI:Destroy() end); UI = nil end
+    if MainUI then pcall(function() MainUI:Destroy() end); MainUI = nil end
 
-    local ScreenGui = Instance.new("ScreenGui")
-    ScreenGui.Name = "AutoTradeUI"
-    ScreenGui.ResetOnSpawn = false
-    ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    local SG = Instance.new("ScreenGui")
+    SG.Name = "AutoTradeMain"
+    SG.ResetOnSpawn = false
+    SG.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 
-    -- Main frame
-    local Main = Instance.new("Frame")
-    Main.Name = "Main"
-    Main.Size = UDim2.new(0, 400, 0, 420)
-    Main.Position = UDim2.new(0, -50, 0.5, -210)
-    Main.BackgroundColor3 = BG
-    Main.BorderSizePixel = 0
+    local Main = Frame(SG, {
+        Size = UDim2.new(0, 380, 0, 440),
+        Position = UDim2.new(0, -400, 0.5, -220),
+        BackgroundColor3 = C.bg,
+        BorderSizePixel = 0,
+        Visible = true
+    })
     Main.Draggable = true
-    Main.Parent = ScreenGui
-    MakeCorner(Main, 14)
-
-    local border = Instance.new("UIStroke")
-    border.Color = BG3
-    border.Thickness = 1.5
-    border.Parent = Main
+    Corner(Main, 16)
+    Stroke(Main, C.bg3, 1.5)
 
     -- Header
-    local Header = Instance.new("Frame")
-    Header.Name = "Header"
-    Header.Size = UDim2.new(1, 0, 0, 44)
-    Header.BackgroundColor3 = Color3.fromRGB(22, 22, 35)
-    Header.BorderSizePixel = 0
-    Header.Parent = Main
-    MakeCorner(Header, 14)
+    local Header = Frame(Main, {
+        Size = UDim2.new(1, 0, 0, 46),
+        BackgroundColor3 = Color3.fromRGB(22, 22, 36),
+        BorderSizePixel = 0
+    })
+    Corner(Header, 16)
 
-    -- Fix bottom corners of header
-    local fixBot = Instance.new("Frame")
-    fixBot.Size = UDim2.new(1, 0, 0, 16)
-    fixBot.Position = UDim2.new(0, 0, 1, -16)
-    fixBot.BackgroundColor3 = Color3.fromRGB(22, 22, 35)
-    fixBot.BackgroundTransparency = 1
-    fixBot.Parent = Header
-
-    local titleLbl = MakeLabel(Header, {
-        Size = UDim2.new(1, -60, 1, 0),
+    Txt(Header, {
+        Size = UDim2.new(1, -70, 1, 0),
         Position = UDim2.new(0, 14, 0, 0),
         BackgroundTransparency = 1,
         Text = "SAILOR PIECE - AUTO TRADE",
-        TextColor3 = ACCENT,
+        TextColor3 = C.accent,
         TextSize = 14,
         Font = Enum.Font.GothamBold,
         TextXAlignment = Enum.TextXAlignment.Left
     })
 
-    -- Close btn
-    local closeBtn = MakeBtn(Header, {
-        Size = UDim2.new(0, 28, 0, 28),
-        Position = UDim2.new(1, -36, 0.5, -14),
+    local closeBtn = Btn(Header, {
+        Size = UDim2.new(0, 30, 0, 30),
+        Position = UDim2.new(1, -38, 0.5, -15),
         BackgroundColor3 = Color3.fromRGB(70, 30, 30),
         Text = "X",
-        TextColor3 = Color3.fromRGB(255, 100, 100),
+        TextColor3 = C.red,
         TextSize = 13,
         Font = Enum.Font.GothamBold
     })
-    MakeCorner(closeBtn, 6)
+    Corner(closeBtn, 6)
     closeBtn.MouseButton1Click:Connect(function()
-        SlideOut(Main, function() UI = nil end)
+        MenuOpen = false
+        if ToggleUI then
+            local btn = ToggleUI:FindFirstChild("Btn")
+            if btn then
+                local icon = btn:FindFirstChild("Icon")
+                if icon then icon.Text = "<>" end
+            end
+        end
+        pcall(function()
+            local t = TweenService:Create(Main, TweenInfo.new(0.25, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
+                Position = UDim2.new(0, -400, 0.5, -220)
+            })
+            t:Play()
+            t.Completed:Connect(function() pcall(function() Main.Visible = false end) end)
+        end)
     end)
 
     -- Body
-    local Body = Instance.new("Frame")
-    Body.Name = "Body"
-    Body.Size = UDim2.new(1, -20, 1, -56)
-    Body.Position = UDim2.new(0, 10, 0, 50)
-    Body.BackgroundTransparency = 1
-    Body.Parent = Main
+    local Body = Frame(Main, {
+        Size = UDim2.new(1, -18, 1, -58),
+        Position = UDim2.new(0, 9, 0, 52),
+        BackgroundTransparency = 1
+    })
 
-    -- ---- ROW 1: Target Player + Quet ----
-    local row1 = Instance.new("Frame")
-    row1.Name = "Row1"
-    row1.Size = UDim2.new(1, 0, 0, 36)
-    row1.BackgroundTransparency = 1
-    row1.Parent = Body
+    -- === ROW 1: Target player + action ===
+    local row1 = Frame(Body, {
+        Size = UDim2.new(1, 0, 0, 36),
+        BackgroundTransparency = 1
+    })
 
-    -- Target label
-    local targetLbl = MakeLabel(row1, {
-        Size = UDim2.new(0, 80, 1, 0),
+    Txt(row1, {
+        Size = UDim2.new(0, 52, 1, 0),
         BackgroundTransparency = 1,
         Text = "Muc tieu:",
-        TextColor3 = TEXT_DIM,
-        TextSize = 11,
+        TextColor3 = C.dim,
+        TextSize = 10,
         Font = Enum.Font.Gotham,
-        TextXAlignment = Enum.TextXAlignment.Left
+        TextXAlignment = Enum.TextXAlignment.Left,
+        TextYAlignment = Enum.TextYAlignment.Center
     })
 
-    local targetName = MakeLabel(row1, {
+    local targetLbl = Txt(row1, {
         Size = UDim2.new(0.45, 0, 1, 0),
-        Position = UDim2.new(0, 80, 0, 0),
-        BackgroundColor3 = BG2,
+        Position = UDim2.new(0, 52, 0, 0),
+        BackgroundColor3 = C.bg2,
         Text = "Chua chon",
-        TextColor3 = TEXT_DIM,
-        TextSize = 12,
+        TextColor3 = C.dim,
+        TextSize = 11,
         Font = Enum.Font.GothamBold,
         TextXAlignment = Enum.TextXAlignment.Left
     })
-    MakeCorner(targetName, 6)
+    Corner(targetLbl, 6)
 
-    local selectBtn = MakeBtn(row1, {
-        Size = UDim2.new(0, 70, 1, 0),
-        Position = UDim2.new(0.5, 0, 0, 0),
+    local selPlrBtn = Btn(row1, {
+        Size = UDim2.new(0, 60, 1, 0),
+        Position = UDim2.new(0.5, 2, 0, 0),
         BackgroundColor3 = Color3.fromRGB(30, 60, 90),
         Text = "Chon",
-        TextColor3 = ACCENT,
+        TextColor3 = C.accent,
         TextSize = 11,
         Font = Enum.Font.GothamBold
     })
-    MakeCorner(selectBtn, 6)
+    Corner(selPlrBtn, 6)
 
-    local quetBtn = MakeBtn(row1, {
-        Size = UDim2.new(0, 90, 1, 0),
-        Position = UDim2.new(1, -90, 0, 0),
+    local quetBtn = Btn(row1, {
+        Size = UDim2.new(0, 65, 1, 0),
+        Position = UDim2.new(1, -65, 0, 0),
         BackgroundColor3 = Color3.fromRGB(30, 60, 90),
-        Text = "Quet Inv",
-        TextColor3 = ACCENT,
+        Text = "QUET",
+        TextColor3 = C.accent,
         TextSize = 11,
         Font = Enum.Font.GothamBold
     })
-    MakeCorner(quetBtn, 6)
+    Corner(quetBtn, 6)
 
-    -- ---- ROW 2: Item List ----
-    local row2 = Instance.new("Frame")
-    row2.Name = "ItemList"
-    row2.Size = UDim2.new(1, 0, 1, -156)
-    row2.Position = UDim2.new(0, 0, 0, 44)
-    row2.BackgroundColor3 = BG2
-    row2.BorderSizePixel = 0
-    row2.Parent = Body
-    MakeCorner(row2, 10)
+    -- === ROW 2: Item list ===
+    local itemFrame = Frame(Body, {
+        Size = UDim2.new(1, 0, 1, -144),
+        Position = UDim2.new(0, 0, 0, 42),
+        BackgroundColor3 = C.bg2,
+        BorderSizePixel = 0
+    })
+    Corner(itemFrame, 10)
 
-    -- Item list inner
-    local innerList = Instance.new("Frame")
-    innerList.Name = "InnerList"
-    innerList.Size = UDim2.new(1, -10, 1, -10)
-    innerList.Position = UDim2.new(0, 5, 0, 5)
-    innerList.BackgroundTransparency = 1
-    innerList.Parent = row2
+    local scroll = Instance.new("ScrollingFrame")
+    scroll.Name = "ItemScroll"
+    scroll.Size = UDim2.new(1, -8, 1, -8)
+    scroll.Position = UDim2.new(0, 4, 0, 4)
+    scroll.BackgroundTransparency = 1
+    scroll.ScrollBarThickness = 4
+    scroll.ScrollBarImageColor3 = C.accent
+    scroll.CanvasSize = UDim2.new(0, 0, 0, 100)
+    scroll.Parent = itemFrame
 
-    -- ---- ROW 3: Summary + Actions ----
-    local row3 = Instance.new("Frame")
-    row3.Name = "Row3"
-    row3.Size = UDim2.new(1, 0, 0, 110)
-    row3.Position = UDim2.new(0, 0, 1, -110)
-    row3.BackgroundTransparency = 1
-    row3.Parent = Body
+    -- === ROW 3: Summary ===
+    local sumRow = Frame(Body, {
+        Size = UDim2.new(1, 0, 0, 34),
+        Position = UDim2.new(0, 0, 1, -100),
+        BackgroundColor3 = C.bg2,
+        BorderSizePixel = 0
+    })
+    Corner(sumRow, 8)
 
-    -- Summary
-    local summary = Instance.new("Frame")
-    summary.Name = "Summary"
-    summary.Size = UDim2.new(1, 0, 0, 36)
-    summary.BackgroundColor3 = BG2
-    summary.BorderSizePixel = 0
-    summary.Parent = row3
-    MakeCorner(summary, 8)
-
-    local selLbl = MakeLabel(summary, {
-        Size = UDim2.new(0.45, 0, 1, 0),
+    local selCntLbl = Txt(sumRow, {
+        Size = UDim2.new(0.5, 0, 1, 0),
         Position = UDim2.new(0, 10, 0, 0),
         BackgroundTransparency = 1,
-        Text = "Chon: 0 items",
-        TextColor3 = TEXT,
+        Text = "Chon: 0",
+        TextColor3 = C.text,
         TextSize = 11,
         Font = Enum.Font.GothamBold,
         TextXAlignment = Enum.TextXAlignment.Left
     })
-
-    local valLbl = MakeLabel(summary, {
-        Size = UDim2.new(0.45, 0, 1, 0),
-        Position = UDim2.new(0.55, 0, 0, 0),
+    local valLbl = Txt(sumRow, {
+        Size = UDim2.new(0.5, 0, 1, 0),
+        Position = UDim2.new(0.5, 0, 0, 0),
         BackgroundTransparency = 1,
         Text = "Gia tri: 0",
-        TextColor3 = YELLOW,
+        TextColor3 = C.yellow,
         TextSize = 11,
         Font = Enum.Font.GothamBold,
         TextXAlignment = Enum.TextXAlignment.Right
     })
 
-    -- Buttons row
-    local btnRow = Instance.new("Frame")
-    btnRow.Name = "BtnRow"
-    btnRow.Size = UDim2.new(1, 0, 0, 66)
-    btnRow.Position = UDim2.new(0, 0, 0, 44)
-    btnRow.BackgroundTransparency = 1
-    btnRow.Parent = row3
+    -- === ROW 4: Buttons ===
+    local btnRow = Frame(Body, {
+        Size = UDim2.new(1, 0, 0, 58),
+        Position = UDim2.new(0, 0, 1, -60),
+        BackgroundTransparency = 1
+    })
 
-    local function makeBigBtn(name, text, color, txtCol, x, w, y)
-        local b = MakeBtn(btnRow, {
+    local function bigBtn(name, text, col, txtCol, x, w)
+        local b = Btn(btnRow, {
             Name = name,
-            Size = UDim2.new(0, w, 0, 30),
-            Position = UDim2.new(0, x, 0, y),
-            BackgroundColor3 = color,
+            Size = UDim2.new(0, w, 0, 28),
+            Position = UDim2.new(0, x, 0, 0),
+            BackgroundColor3 = col,
             Text = text,
             TextColor3 = txtCol,
-            TextSize = 12,
+            TextSize = 11,
             Font = Enum.Font.GothamBold
         })
-        MakeCorner(b, 8)
+        Corner(b, 7)
         return b
     end
 
-    local selAllBtn = makeBigBtn("SelAll", "Chon Tat Ca", Color3.fromRGB(35, 60, 90), ACCENT, 0, 100, 0)
-    local deselBtn = makeBigBtn("DeselAll", "Bo Chon", Color3.fromRGB(70, 40, 40), Color3.fromRGB(255, 120, 120), 108, 70, 0)
-    local tradeBtn = makeBigBtn("Trade", "GUI TRADE", Color3.fromRGB(30, 80, 40), GREEN, 186, 100, 0)
-    local discordBtn = makeBigBtn("Discord", "Discord", Color3.fromRGB(50, 35, 90), Color3.fromRGB(170, 150, 220), 0, 110, 36)
-    local refreshBtn = makeBigBtn("Refresh", "Tai Lai", Color3.fromRGB(50, 50, 70), TEXT, 118, 90, 36)
-    local clearBtn = makeBigBtn("Clear", "Xoa List", Color3.fromRGB(70, 30, 30), Color3.fromRGB(255, 100, 100), 216, 80, 36)
-
-    -- Stats bar
-    local statsBar = Instance.new("Frame")
-    statsBar.Name = "Stats"
-    statsBar.Size = UDim2.new(1, 0, 0, 16)
-    statsBar.BackgroundTransparency = 1
-    statsBar.Parent = row3
-
-    local statsLbl = MakeLabel(statsBar, {
-        Size = UDim2.new(1, 0, 1, 0),
-        BackgroundTransparency = 1,
-        Text = "Trades: 0  |  Da add: 0 items",
-        TextColor3 = TEXT_DIM,
+    local selAllBtn = bigBtn("SelAll", "Tat Ca", Color3.fromRGB(35, 55, 85), C.accent, 0, 65)
+    local deselBtn = bigBtn("Desel", "Bo", Color3.fromRGB(65, 35, 35), C.red, 71, 45)
+    local tradeBtn = bigBtn("Trade", "GUI TRADE", Color3.fromRGB(25, 80, 35), C.green, 122, 100)
+    local discordBtn = bigBtn("Discord", "Discord", Color3.fromRGB(50, 35, 90), Color3.fromRGB(170, 150, 220), 228, 75)
+    local webLbl = Txt(btnRow, {
+        Name = "WebStatus",
+        Size = UDim2.new(0, 72, 0, 22),
+        Position = UDim2.new(1, -72, 0, 32),
+        BackgroundColor3 = Color3.fromRGB(60, 30, 30),
+        Text = "Web: ?",
+        TextColor3 = C.dim,
         TextSize = 9,
-        Font = Enum.Font.Gotham,
-        TextXAlignment = Enum.TextXAlignment.Center
+        Font = Enum.Font.GothamBold
     })
+    Corner(webLbl, 6)
 
-    -- ===== FUNCTION REFS =====
+    -- === UPDATE FUNCTIONS ===
     local function RefreshSummary()
-        local sel = 0
+        local cnt = 0
         local val = 0
-        for _, item in ipairs(TradeItems) do
+        for _, item in ipairs(Inventory) do
             if item.selected then
-                sel = sel + item.qty
+                cnt = cnt + item.qty
                 val = val + item.value * item.qty
             end
         end
-        SetText(selLbl, "Chon: " .. sel .. " items")
+        SetText(selCntLbl, "Chon: " .. cnt)
         SetText(valLbl, "Gia tri: " .. FormatVal(val))
+        SetText(webLbl, WebhookOK == true and "Web: OK" or (WebhookOK == false and "Web: Loi" or "Web: ..."))
+        if WebhookOK == true then webLbl.BackgroundColor3 = Color3.fromRGB(25, 60, 30)
+        elseif WebhookOK == false then webLbl.BackgroundColor3 = Color3.fromRGB(60, 25, 25)
+        else webLbl.BackgroundColor3 = Color3.fromRGB(40, 40, 40) end
     end
 
-    local function RenderList()
-        RenderItemList(innerList)
-        RefreshSummary()
-    end
-
-    local function RefreshStats()
-        SetText(statsLbl, "Trades: " .. Stats.trades_sent .. "  |  Da add: " .. Stats.items_added .. " items  |  Tong gia tri: " .. FormatVal(Stats.total_value))
-    end
-
-    local function UpdateTarget()
+    local function UpdateTargetLbl()
         if TargetPlayer then
-            SetText(targetName, TargetPlayer.Name)
-            targetName.TextColor3 = GREEN
+            SetText(targetLbl, TargetPlayer.Name)
+            targetLbl.TextColor3 = C.green
         else
-            SetText(targetName, "Chua chon")
-            targetName.TextColor3 = TEXT_DIM
+            SetText(targetLbl, "Chua chon")
+            targetLbl.TextColor3 = C.dim
         end
     end
 
-    -- ===== EVENT HANDLERS =====
-    selectBtn.MouseButton1Click:Connect(function()
+    local function RenderList()
+        RenderItems(scroll, RefreshSummary)
+        RefreshSummary()
+    end
+
+    -- === EVENTS ===
+    selPlrBtn.MouseButton1Click:Connect(function()
         CreatePlayerSelector(function(p)
             TargetPlayer = p
-            UpdateTarget()
+            UpdateTargetLbl()
         end)
     end)
 
     quetBtn.MouseButton1Click:Connect(function()
-        local items = ScanInventory()
+        ScanInventory()
         RenderList()
     end)
 
     selAllBtn.MouseButton1Click:Connect(function()
-        for _, item in ipairs(TradeItems) do
+        for _, item in ipairs(Inventory) do
             item.selected = true
             item.qty = 1
         end
@@ -824,7 +686,7 @@ local function CreateMainUI()
     end)
 
     deselBtn.MouseButton1Click:Connect(function()
-        for _, item in ipairs(TradeItems) do
+        for _, item in ipairs(Inventory) do
             item.selected = false
         end
         RenderList()
@@ -832,247 +694,195 @@ local function CreateMainUI()
 
     tradeBtn.MouseButton1Click:Connect(function()
         if not TargetPlayer then
-            LogErr("Chua chon player!")
+            Log("Chua chon player")
             CreatePlayerSelector(function(p)
                 TargetPlayer = p
-                UpdateTarget()
+                UpdateTargetLbl()
             end)
             return
         end
-        local selectedCount = 0
-        for _, item in ipairs(TradeItems) do
-            if item.selected then selectedCount = selectedCount + item.qty end
+        local selItems = {}
+        for _, item in ipairs(Inventory) do
+            if item.selected then table.insert(selItems, item) end
         end
-        if selectedCount == 0 then
-            LogErr("Chua chon item nao!")
+        if #selItems == 0 then
+            Log("Chua chon item nao")
             return
         end
 
-        -- Gui trade
-        SendTradeToPlayer(TargetPlayer)
+        -- Tim trade remote
+        local remote = nil
+        for _, obj in pairs(ReplicatedStorage:GetChildren()) do
+            if obj:IsA("RemoteEvent") or obj:IsA("RemoteFunction") then
+                local n = string.lower(obj.Name)
+                if n:find("trade") and not n:find("accept") then
+                    remote = obj
+                    break
+                end
+            end
+        end
 
-        -- Add items
-        task.spawn(function()
-            task.wait(0.5)
-            AddItemsInTradeGui()
-            RefreshStats()
-        end)
+        if remote then
+            pcall(function()
+                if remote:IsA("RemoteFunction") then
+                    remote:CallServerAsync(TargetPlayer)
+                else
+                    remote:FireServer(TargetPlayer)
+                end
+            end)
+            Log("Da gui trade toi: " .. TargetPlayer.Name)
+        end
+
+        Stats.trades = Stats.trades + 1
 
         -- Gui Discord
-        local selItems = {}
-        for _, item in ipairs(TradeItems) do
-            if item.selected then table.insert(selItems, item) end
-        end
         local lines = {}
         local totalVal = 0
         for i, item in ipairs(selItems) do
             table.insert(lines, string.format("**%d.** %s [%s] x%d", i, item.name, item.rarity, item.qty))
             totalVal = totalVal + item.value * item.qty
         end
-        SendDiscord(
+
+        SendWebhook(
             "Trade: " .. TargetPlayer.Name,
-            string.format("**Nguoi nhan:** %s\n**Items:** %d\n**Tong gia tri:** %s\n**Time:** %s\n\n" ..
-            table.concat(lines, "\n"), TargetPlayer.Name, #selItems, FormatVal(totalVal), os.date("%d/%m/%Y %H:%M:%S")),
+            string.format("**Nguoi nhan:** %s\n**Items:** %d\n**Tong gia tri:** %s\n**Time:** %s\n\n%s",
+                TargetPlayer.Name, #selItems, FormatVal(totalVal), os.date("%d/%m/%Y %H:%M:%S"),
+                table.concat(lines, "\n")
+            ),
             0x55AAFF
         )
+
+        RefreshSummary()
     end)
 
     discordBtn.MouseButton1Click:Connect(function()
-        SendDiscord("AutoTrade - Manual", "Player " .. LocalPlayer.Name .. " - " .. os.date("%d/%m/%Y %H:%M:%S"), 0x55AAFF)
-        Log("Da gui Discord")
-    end)
-
-    refreshBtn.MouseButton1Click:Connect(function()
-        local items = ScanInventory()
-        RenderList()
-        RefreshStats()
-    end)
-
-    clearBtn.MouseButton1Click:Connect(function()
-        TradeItems = {}
-        TargetPlayer = nil
-        UpdateTarget()
-        RenderList()
-        RefreshStats()
+        SendWebhook(
+            "AutoTrade - Manual",
+            "Player: " .. LocalPlayer.Name .. "\nTime: " .. os.date("%d/%m/%Y %H:%M:%S"),
+            0x55AAFF
+        )
+        Log("Da gui Discord test")
     end)
 
     -- Initial render
     RenderList()
-    RefreshStats()
-    UpdateTarget()
+    UpdateTargetLbl()
+    RefreshSummary()
 
-    -- ===== KEYBINDS =====
-    UserInputService.InputBegan:Connect(function(input, processed)
-        if processed then return end
-        if input.KeyCode == Enum.KeyCode.F11 then
-            -- Toggle menu via button click
-            if ToggleBtn then
-                local btn = ToggleBtn:FindFirstChild("ToggleBtn")
-                if btn then
-                    pcall(function() firesignal(btn.MouseButton1Click) end)
-                end
-            end
-        elseif input.KeyCode == Enum.KeyCode.F10 then
-            CreatePlayerSelector(function(p)
-                TargetPlayer = p
-                UpdateTarget()
-            end)
-        elseif input.KeyCode == Enum.KeyCode.Delete then
-            if UI then
-                pcall(function() UI:Destroy() end)
-                UI = nil
-                MenuVisible = false
-                if ToggleBtn then
-                    local btn = ToggleBtn:FindFirstChild("ToggleBtn")
-                    if btn then
-                        local icon = btn:FindFirstChild("Icon")
-                        local stroke = btn:FindFirstChildWhichIsA("UIStroke")
-                        if icon then icon.Text = "<>" end
-                        if stroke then stroke.Color = ACCENT end
-                    end
-                end
-            end
-        end
+    SG.Parent = LocalPlayer.PlayerGui
+    MainUI = SG
+
+    -- Slide in
+    pcall(function()
+        Main.Position = UDim2.new(0, -400, 0.5, -220)
+        local t = TweenService:Create(Main, TweenInfo.new(0.3, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
+            Position = UDim2.new(0, 80, 0.5, -220)
+        })
+        t:Play()
     end)
-
-    ScreenGui.Parent = LocalPlayer.PlayerGui
-    UI = ScreenGui
-    -- Menu hidden by default when using toggle
-    Main.Visible = false
-    Log("Menu da tao (an)!")
+    MenuOpen = true
+    Log("Menu da mo!")
 end
 
 -- ===================== TOGGLE BUTTON =====================
 local function CreateToggleButton()
-    if ToggleBtn then pcall(function() ToggleBtn:Destroy() end); ToggleBtn = nil end
+    if ToggleUI then pcall(function() ToggleUI:Destroy() end); ToggleUI = nil end
 
-    local ScreenGui = Instance.new("ScreenGui")
-    ScreenGui.Name = "TradeToggle"
-    ScreenGui.ResetOnSpawn = false
-    ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-    ScreenGui.IgnoreGuiInset = true
+    local SG = Instance.new("ScreenGui")
+    SG.Name = "TradeToggle"
+    SG.ResetOnSpawn = false
+    SG.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    SG.IgnoreGuiInset = true
 
-    -- Main rounded square button
-    local btn = Instance.new("TextButton")
-    btn.Name = "ToggleBtn"
-    btn.Size = UDim2.new(0, 50, 0, 50)
-    btn.Position = UDim2.new(0, 20, 0, 20)
-    btn.BackgroundColor3 = Color3.fromRGB(20, 20, 35)
-    btn.Text = ""
-    btn.Draggable = true
-    btn.AutoButtonColor = false
-    btn.Parent = ScreenGui
+    local Btn = Instance.new("TextButton")
+    Btn.Name = "Btn"
+    Btn.Size = UDim2.new(0, 56, 0, 56)
+    Btn.Position = UDim2.new(0, 16, 0, 16)
+    Btn.BackgroundColor3 = Color3.fromRGB(22, 22, 38)
+    Btn.Text = ""
+    Btn.AutoButtonColor = false
+    Btn.Draggable = true
+    Btn.Parent = SG
 
-    -- Rounded corners
-    local corner = Instance.new("UICorner")
-    corner.CornerRadius = UDim.new(0, 14)
-    corner.Parent = btn
+    Corner(Btn, 16)
+    Stroke(Btn, C.accent, 2)
 
-    -- Border stroke
-    local stroke = Instance.new("UIStroke")
-    stroke.Color = ACCENT
-    stroke.Thickness = 2
-    stroke.Parent = btn
+    local Icon = Txt(Btn, {
+        Size = UDim2.new(1, 0, 1, 0),
+        BackgroundTransparency = 1,
+        Text = "<>",
+        TextColor3 = C.accent,
+        TextSize = 20,
+        Font = Enum.Font.GothamBold
+    })
 
-    -- Icon: two arrows <>
-    local icon = Instance.new("TextLabel")
-    icon.Name = "Icon"
-    icon.Size = UDim2.new(1, 0, 1, 0)
-    icon.BackgroundTransparency = 1
-    icon.Text = "<>"
-    icon.TextColor3 = ACCENT
-    icon.TextSize = 18
-    icon.Font = Enum.Font.GothamBold
-    icon.Parent = btn
-
-    -- Glow effect
-    local glow = Instance.new("ImageLabel")
-    glow.Name = "Glow"
-    glow.Size = UDim2.new(1, 16, 1, 16)
-    glow.Position = UDim2.new(0.5, -8, 0.5, -8)
-    glow.BackgroundTransparency = 1
-    glow.Image = "rbxassetid://15218514988"
-    glow.ImageColor3 = ACCENT
-    glow.ImageTransparency = 0.5
-    glow.ZIndex = 0
-    glow.Parent = btn
-
-    local glowCorner = Instance.new("UICorner")
-    glowCorner.CornerRadius = UDim.new(0, 14)
-    glowCorner.Parent = glow
-
-    -- Hover animation
-    btn.MouseEnter:Connect(function()
+    -- Hover
+    Btn.MouseEnter:Connect(function()
         pcall(function()
-            TweenService:Create(btn, TweenInfo.new(0.15), {BackgroundColor3 = Color3.fromRGB(30, 50, 80)}):Play()
-            TweenService:Create(stroke, TweenInfo.new(0.15), {Thickness = 3}):Play()
-            TweenService:Create(icon, TweenInfo.new(0.15), {TextColor3 = Color3.fromRGB(255, 255, 255)}):Play()
+            TweenService:Create(Btn, TweenInfo.new(0.12), {BackgroundColor3 = Color3.fromRGB(35, 55, 85)}):Play()
         end)
     end)
-    btn.MouseLeave:Connect(function()
+    Btn.MouseLeave:Connect(function()
         pcall(function()
-            TweenService:Create(btn, TweenInfo.new(0.15), {BackgroundColor3 = Color3.fromRGB(20, 20, 35)}):Play()
-            TweenService:Create(stroke, TweenInfo.new(0.15), {Thickness = 2}):Play()
-            TweenService:Create(icon, TweenInfo.new(0.15), {TextColor3 = ACCENT}):Play()
+            TweenService:Create(Btn, TweenInfo.new(0.12), {BackgroundColor3 = Color3.fromRGB(22, 22, 38)}):Play()
         end)
     end)
 
-    -- Click: toggle menu
-    btn.MouseButton1Click:Connect(function()
+    -- Click
+    Btn.MouseButton1Click:Connect(function()
         pcall(function()
-            TweenService:Create(btn, TweenInfo.new(0.1), {Size = UDim2.new(0, 46, 0, 46)}):Play()
-            task.wait(0.1)
-            TweenService:Create(btn, TweenInfo.new(0.1), {Size = UDim2.new(0, 50, 0, 50)}):Play()
+            TweenService:Create(Btn, TweenInfo.new(0.08), {Size = UDim2.new(0, 52, 0, 52)}):Play()
+            task.wait(0.08)
+            TweenService:Create(Btn, TweenInfo.new(0.08), {Size = UDim2.new(0, 56, 0, 56)}):Play()
         end)
 
-        if MenuVisible then
+        if MenuOpen then
             -- An menu
-            if UI then
-                local main = UI.Main
-                pcall(function()
-                    local t = TweenService:Create(main, TweenInfo.new(0.25, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
-                        Position = UDim2.new(0, -410, 0.5, -210),
-                        Transparency = 1
-                    })
-                    t:Play()
-                    t.Completed:Connect(function()
-                        pcall(function() main.Visible = false end)
+            if MainUI then
+                local main = MainUI:FindFirstChildWhichIsA("Frame")
+                if main then
+                    pcall(function()
+                        local t = TweenService:Create(main, TweenInfo.new(0.22, Enum.EasingStyle.Quad), {
+                            Position = UDim2.new(0, -400, 0.5, -220)
+                        })
+                        t:Play()
+                        t.Completed:Connect(function() pcall(function() main.Visible = false end) end)
                     end)
-                end)
+                end
             end
-            MenuVisible = false
-            icon.Text = "<>"
-            stroke.Color = ACCENT
+            MenuOpen = false
+            Icon.Text = "<>"
+            Stroke(Btn, C.accent, 2)
         else
-            -- Hien menu
-            if not UI then
+            -- Mo menu
+            if not MainUI then
                 CreateMainUI()
-            end
-            if UI then
-                local main = UI.Main
-                pcall(function()
+            elseif MainUI then
+                local main = MainUI:FindFirstChildWhichIsA("Frame")
+                if main then
                     main.Visible = true
-                    main.Position = UDim2.new(0, -410, 0.5, -210)
-                    local t = TweenService:Create(main, TweenInfo.new(0.3, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
-                        Position = UDim2.new(0, 20, 0.5, -210)
-                    })
-                    t:Play()
-                end)
+                    pcall(function()
+                        local t = TweenService:Create(main, TweenInfo.new(0.3, Enum.EasingStyle.Back), {
+                            Position = UDim2.new(0, 80, 0.5, -220)
+                        })
+                        t:Play()
+                    end)
+                end
             end
-            MenuVisible = true
-            icon.Text = "X"
-            stroke.Color = GREEN
+            MenuOpen = true
+            Icon.Text = "X"
+            Stroke(Btn, C.green, 2)
         end
     end)
 
-    -- Right click to destroy toggle
-    btn.MouseButton2Click:Connect(function()
-        pcall(function() ScreenGui:Destroy() end)
-        ToggleBtn = nil
+    -- Right click: destroy
+    Btn.MouseButton2Click:Connect(function()
+        pcall(function() SG:Destroy() end)
+        ToggleUI = nil
     end)
 
-    ScreenGui.Parent = LocalPlayer.PlayerGui
-    ToggleBtn = ScreenGui
+    SG.Parent = LocalPlayer.PlayerGui
+    ToggleUI = SG
     Log("Toggle button da tao!")
 end
 
@@ -1080,190 +890,185 @@ end
 local function CreatePlayerSelector(onSelect)
     if PlayerSelUI then pcall(function() PlayerSelUI:Destroy() end); PlayerSelUI = nil end
 
-    local ScreenGui = Instance.new("ScreenGui")
-    ScreenGui.Name = "PlayerSelectorUI"
-    ScreenGui.ResetOnSpawn = false
-    ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    local SG = Instance.new("ScreenGui")
+    SG.Name = "PlayerSel"
+    SG.ResetOnSpawn = false
+    SG.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 
-    local Main = Instance.new("Frame")
-    Main.Size = UDim2.new(0, 320, 0, 360)
-    Main.Position = UDim2.new(0.5, -160, 0.5, -180)
-    Main.BackgroundColor3 = BG
-    Main.BorderSizePixel = 0
+    local Main = Frame(SG, {
+        Size = UDim2.new(0, 300, 0, 340),
+        Position = UDim2.new(0.5, -150, 0.5, -170),
+        BackgroundColor3 = C.bg,
+        BorderSizePixel = 0
+    })
     Main.Draggable = true
-    Main.Parent = ScreenGui
-    MakeCorner(Main, 14)
-    MakeStroke(Main, BG3)
+    Corner(Main, 16)
+    Stroke(Main, C.bg3, 1)
 
-    -- Header
-    local h = Instance.new("Frame")
-    h.Size = UDim2.new(1, 0, 0, 40)
-    h.BackgroundColor3 = Color3.fromRGB(22, 22, 35)
-    h.BorderSizePixel = 0
-    h.Parent = Main
-    MakeCorner(h, 14)
-    Instance.new("Frame").Size = UDim2.new(1, 0, 0, 14); Instance.new("Frame").Position = UDim2.new(0, 0, 1, -14); Instance.new("Frame").BackgroundTransparency = 1
+    local h = Frame(Main, {
+        Size = UDim2.new(1, 0, 0, 42),
+        BackgroundColor3 = Color3.fromRGB(22, 22, 36),
+        BorderSizePixel = 0
+    })
+    Corner(h, 16)
 
-    MakeLabel(h, {
-        Size = UDim2.new(1, -60, 1, 0),
-        Position = UDim2.new(0, 14, 0, 0),
+    Txt(h, {
+        Size = UDim2.new(1, -70, 1, 0),
+        Position = UDim2.new(0, 12, 0, 0),
         BackgroundTransparency = 1,
         Text = "CHON PLAYER",
-        TextColor3 = ACCENT,
+        TextColor3 = C.accent,
         TextSize = 13,
         Font = Enum.Font.GothamBold,
         TextXAlignment = Enum.TextXAlignment.Left
     })
 
-    local closeBtn = MakeBtn(h, {
-        Size = UDim2.new(0, 28, 0, 28),
-        Position = UDim2.new(1, -36, 0.5, -14),
+    local closeBtn = Btn(h, {
+        Size = UDim2.new(0, 30, 0, 30),
+        Position = UDim2.new(1, -38, 0.5, -15),
         BackgroundColor3 = Color3.fromRGB(70, 30, 30),
         Text = "X",
-        TextColor3 = Color3.fromRGB(255, 100, 100),
+        TextColor3 = C.red,
         TextSize = 13,
         Font = Enum.Font.GothamBold
     })
-    MakeCorner(closeBtn, 6)
+    Corner(closeBtn, 6)
     closeBtn.MouseButton1Click:Connect(function()
-        pcall(function() ScreenGui:Destroy() end)
+        pcall(function() SG:Destroy() end)
         PlayerSelUI = nil
     end)
 
-    -- Player list
     local listFrame = Instance.new("ScrollingFrame")
-    listFrame.Size = UDim2.new(1, -20, 1, -90)
-    listFrame.Position = UDim2.new(0, 10, 0, 48)
-    listFrame.BackgroundColor3 = BG2
+    listFrame.Size = UDim2.new(1, -16, 1, -100)
+    listFrame.Position = UDim2.new(0, 8, 0, 50)
+    listFrame.BackgroundColor3 = C.bg2
     listFrame.BorderSizePixel = 0
     listFrame.ScrollBarThickness = 4
-    listFrame.ScrollBarImageColor3 = ACCENT
+    listFrame.ScrollBarImageColor3 = C.accent
     listFrame.CanvasSize = UDim2.new(0, 0, 0, 0)
     listFrame.Parent = Main
-    MakeCorner(listFrame, 10)
+    Corner(listFrame, 10)
 
     local ly = Instance.new("UIListLayout")
     ly.SortOrder = Enum.SortOrder.LayoutOrder
-    ly.Padding = UDim.new(0, 6)
+    ly.Padding = UDim.new(0, 5)
     ly.Parent = listFrame
 
     local players = {}
     for _, p in pairs(Players:GetPlayers()) do
-        if p ~= LocalPlayer then
-            table.insert(players, p)
-        end
+        if p ~= LocalPlayer then table.insert(players, p) end
     end
 
     if #players == 0 then
-        MakeLabel(listFrame, {
-            Size = UDim2.new(1, 0, 0, 60),
+        Txt(listFrame, {
+            Size = UDim2.new(1, 0, 0, 80),
             BackgroundTransparency = 1,
-            Text = "Khong co player nao trong server.\nDoi them nguoi choi.",
-            TextColor3 = TEXT_DIM,
+            Text = "Khong co player nao.\nDoi them nguoi choi.",
+            TextColor3 = C.dim,
             TextSize = 11,
             Font = Enum.Font.Gotham,
             LayoutOrder = 0
         })
     else
         for i, p in ipairs(players) do
-            local btn = Instance.new("TextButton")
-            btn.Size = UDim2.new(1, 0, 0, 42)
-            btn.BackgroundColor3 = BG3
-            btn.Text = ""
-            btn.LayoutOrder = i
-            btn.Parent = listFrame
-            MakeCorner(btn, 8)
+            local pb = Btn(listFrame, {
+                Size = UDim2.new(1, 0, 0, 40),
+                BackgroundColor3 = C.bg3,
+                Text = "",
+                LayoutOrder = i
+            })
+            Corner(pb, 8)
 
-            MakeLabel(btn, {
+            Txt(pb, {
                 Size = UDim2.new(1, -10, 1, 0),
                 Position = UDim2.new(0, 10, 0, 0),
                 BackgroundTransparency = 1,
                 Text = p.Name,
-                TextColor3 = TEXT,
+                TextColor3 = C.text,
                 TextSize = 13,
                 Font = Enum.Font.GothamBold,
                 TextXAlignment = Enum.TextXAlignment.Left
             })
 
-            btn.MouseButton1Click:Connect(function()
-                pcall(function() ScreenGui:Destroy() end)
+            pb.MouseButton1Click:Connect(function()
+                pcall(function() SG:Destroy() end)
                 PlayerSelUI = nil
                 if onSelect then onSelect(p) end
             end)
 
-            btn.MouseEnter:Connect(function()
+            pb.MouseEnter:Connect(function()
                 pcall(function()
-                    TweenService:Create(btn, TweenInfo.new(0.15), {BackgroundColor3 = Color3.fromRGB(50, 50, 75)}):Play()
+                    TweenService:Create(pb, TweenInfo.new(0.1), {BackgroundColor3 = Color3.fromRGB(50, 50, 75)}):Play()
                 end)
             end)
-            btn.MouseLeave:Connect(function()
+            pb.MouseLeave:Connect(function()
                 pcall(function()
-                    TweenService:Create(btn, TweenInfo.new(0.15), {BackgroundColor3 = BG3}):Play()
+                    TweenService:Create(pb, TweenInfo.new(0.1), {BackgroundColor3 = C.bg3}):Play()
                 end)
             end)
         end
-        listFrame.CanvasSize = UDim2.new(0, 0, 0, #players * 48 + 10)
+        listFrame.CanvasSize = UDim2.new(0, 0, 0, #players * 45 + 10)
     end
 
-    local hint = MakeLabel(Main, {
-        Size = UDim2.new(1, 0, 0, 30),
-        Position = UDim2.new(0, 0, 1, -38),
+    Txt(Main, {
+        Size = UDim2.new(1, 0, 0, 28),
+        Position = UDim2.new(0, 0, 1, -36),
         BackgroundTransparency = 1,
-        Text = "F10 de mo, DEL de dong",
-        TextColor3 = TEXT_DIM,
+        Text = "Right-click de dong",
+        TextColor3 = C.dim,
         TextSize = 9,
         Font = Enum.Font.Gotham
     })
 
-    ScreenGui.Parent = LocalPlayer.PlayerGui
-    PlayerSelUI = ScreenGui
+    SG.Parent = LocalPlayer.PlayerGui
+    PlayerSelUI = SG
 end
 
--- ===================== STARTUP =====================
-Log("========================================")
+-- ===================== START =====================
+Log("======================================")
 Log("Sailor Piece AutoTrade")
-Log("Dang khoi dong...")
-Log("========================================")
+Log("======================================")
 
--- Test Discord
-SendTestDiscord()
-Log("Da gui test message Discord")
+-- Test webhook ngay
+TestWebhook()
 
--- Tao toggle button ngay
+-- Tao toggle button
 CreateToggleButton()
 
--- Tao menu (an)
+-- Tao main UI (an)
 task.wait(0.3)
 CreateMainUI()
 
--- Auto scan inventory
+-- Quet inventory
 task.wait(0.5)
 ScanInventory()
 
--- Refresh list in UI if exists
-task.wait(0.5)
-if UI then
-    local body = UI.Main:FindFirstChild("Body")
-    if body then
-        local inner = body.ItemList:FindFirstChild("InnerList")
-        if inner then
-            RenderItemList(inner)
-            local selLbl = body.Row3:FindFirstChild("Summary")
-            if selLbl then
-                local sel = 0; local val = 0
-                for _, item in ipairs(TradeItems) do
-                    if item.selected then sel = sel + item.qty; val = val + item.value * item.qty end
-                end
-                local l1 = selLbl:FindFirstChildWhichIsA("TextLabel")
-                local l2 = selLbl:FindFirstChildWhichIsA("TextLabel")
-                if l1 then l1.Text = "Chon: " .. sel .. " items" end
+-- Render list
+if MainUI then
+    local scroll = MainUI:FindFirstChildWhichIsA("Frame")
+    if scroll then scroll = scroll:FindFirstChild("ItemScroll") end
+    if scroll then
+        RenderItems(scroll, function()
+            local cnt = 0; local val = 0
+            for _, item in ipairs(Inventory) do
+                if item.selected then cnt = cnt + item.qty; val = val + item.value * item.qty end
             end
-        end
+            local main = MainUI:FindFirstChildWhichIsA("Frame")
+            if main then
+                local body = main:FindFirstChild("Body")
+                if body then
+                    local sum = body:FindFirstChild("Summary")
+                    if sum then
+                        local ch = sum:FindFirstChild("TextLabel")
+                        if ch then ch.Text = "Chon: " .. cnt end
+                    end
+                end
+            end
+        end)
     end
 end
 
-Log("========================================")
+Log("======================================")
 Log("Khoi dong xong!")
 Log("<> : Mo/tat menu")
-Log("F10: Chon player")
-Log("========================================")
+Log("======================================")
