@@ -1,31 +1,19 @@
 --[[
-  SAILOR PIECE - AUTO TRADE + ITEM TRACKING + DISCORD WEBHOOK
-  Lua moi: Chon player -> Gui trade request -> Add items (button hoac Discord Modal)
+  SAILOR PIECE - AUTO TRADE v2
+  Chon player -> Gui trade -> Add items -> Gui Discord
 
-  Luong hoat dong:
-  1. Chon player trong server de gui trade request
-  2. Add items vao trade (button START/STOP, mac dinh add full quantity)
-  3. Gui danh sach item ra Discord voi so thu tu
-  4. Nguoi dung dien so thu tu vao Modal Interaction de auto add items
-  5. Nguoi dung tu bam accept trade thu cong
+  Huong dan su dung:
+  1. Nhan F11 de mo/tat menu
+  2. Nhan "Chon Player" de chon nguoi trade
+  3. Gui trade request
+  4. Nhan "Add Items" de add items vao trade
+  5. Nhan "Gui Discord" de gui danh sach item ra Discord
+  6. Tu bam Accept trade
 
   LUU Y:
-  - Bật "Allow HTTP Requests" trong executor settings
-  - Thay WEBHOOK_URL bằng link webhook Discord của bạn
+  - Bat "Allow HTTP Requests" trong executor
+  - Webhook URL da duoc cau hinh san
 ]]
-
--- ===================== CONFIG =====================
-local CONFIG = {
-    WEBHOOK_URL = "https://discord.com/api/webhooks/1448927972068167832/9DibtGcZHL_yhSpJtyLh_tmRdm5kLHluAcWzk8YGkfN2d4OtF9DzDD_dRlEvLRbYPWTb",
-    ITEM_TRACKING_ENABLED = true,              -- Bat theo doi item (gui Discord)
-    AUTO_REJOIN = false,                       -- Bat auto rejoin khi disconnect
-    NOTIFY_ALL_TRADES = true,                  -- Thong bao trade ra Discord
-    LOG_TRADES = true,                         -- In log ra console
-    ANTI_AFK = false,                           -- Chong kick AFK
-    SCAN_INVENTORY_INTERVAL = 5,              -- Khoang thoi gian quet inventory (giay)
-    DISCORD_POLL_INTERVAL = 3,                 -- Khoang thoi gian doc Discord interaction (giay)
-    MAX_TRADE_ITEMS = 10,                     -- So item toi da add vao 1 trade
-}
 
 -- ===================== SERVICES =====================
 local Players = game:GetService("Players")
@@ -33,1497 +21,829 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local TeleportService = game:GetService("TeleportService")
 local HttpService = game:GetService("HttpService")
 local UserInputService = game:GetService("UserInputService")
-local RunService = game:GetService("RunService")
-local VirtualInputManager = game:GetService("VirtualInputManager")
-local MarketplaceService = game:GetService("MarketplaceService")
-
 local LocalPlayer = Players.LocalPlayer
-local CurrentPlayer = LocalPlayer.Name
-local MarketplaceInfo = MarketplaceService:GetProductInfo(game.PlaceId)
+
+-- ===================== CONFIG =====================
+local WEBHOOK_URL = "https://discord.com/api/webhooks/1448927972068167832/9DibtGcZHL_yhSpJtyLh_tmRdm5kLHluAcWzk8YGkfN2d4OtF9DzDD_dRlEvLRbYPWTb"
 
 -- ===================== STATE =====================
 local MenuGui = nil
-local PlayerInventoryCache = {}
-local ItemDatabase = {}
-local TrackedItemHistory = {}
-local SessionStats = {trades_sent = 0, items_added = 0, trades_completed = 0}
+local TargetPlayerName = ""
+local ItemsToTrade = {}
+local AddingItems = false
+local Stats = {trades_sent = 0, items_added = 0}
+local InventoryList = {} -- {name, rarity, value, tier}
 
--- Trade session state
-local TradeSession = {
-    active = false,
-    targetPlayer = nil,       -- Player object nhan trade
-    targetUsername = "",      -- Ten player
-    itemsToTrade = {},        -- Danh sach items can add vao trade
-    addingItems = false,      -- Dang trong qua trinh add items
-    tradeGui = nil,           -- Trade GUI hien tai
-    pendingItemSelections = {}, -- Item selections tu Discord Modal
-}
-
--- ===================== INVENTORY SYSTEM (Dynamic from hidden module) =====================
-
-local function DetectInventoryModules()
-    local candidates = {}
-
-    local function search(parent, path)
-        if not parent then return end
-        pcall(function()
-            for _, child in pairs(parent:GetChildren()) do
-                local childPath = path .. "." .. child.Name
-                if child:IsA("ModuleScript") then
-                    local ok, env = pcall(require, child)
-                    if ok and env then
-                        if env.Items or env.Inventory or env.GetInventory or env.ItemsDB or env.ItemData then
-                            table.insert(candidates, {module = child, path = childPath, env = env})
-                        end
-                    end
-                end
-                if child:IsA("Folder") or child:IsA("ModuleScript") or child:IsA("RemoteEvent") then
-                    search(child, childPath)
-                end
-            end
-        end)
-    end
-
-    pcall(function() search(ReplicatedStorage, "ReplicatedStorage") end)
-    pcall(function() search(game:GetService("ServerScriptService"), "ServerScriptService") end)
-    pcall(function() search(game:GetService("StarterGui"), "StarterGui") end)
-    pcall(function() search(game:GetService("StarterPlayer"):WaitForChild("StarterPlayerScripts"), "StarterPlayerScripts") end)
-
+-- ===================== LOG =====================
+local function Log(msg)
     pcall(function()
-        for _, remote in pairs(ReplicatedStorage:GetChildren()) do
-            if remote:IsA("RemoteEvent") or remote:IsA("RemoteFunction") then
-                local name = remote.Name:lower()
-                if name:find("inventory") or name:find("item") or name:find("backpack") then
-                    Log("Tim thay remote inventory: " .. remote.Name, Color3.fromRGB(200, 200, 100))
-                end
-            end
+        print("[AutoTrade] " .. os.date("%H:%M:%S") .. " " .. msg)
+        if rconsoleprint then
+            rconsoleprint("[AutoTrade] " .. os.date("%H:%M:%S") .. " " .. msg .. "\n")
         end
     end)
-
-    return candidates
 end
 
-local function BuildItemDatabaseFromModules()
-    local modules = DetectInventoryModules()
-
-    for _, cand in ipairs(modules) do
-        pcall(function()
-            local env = cand.env
-            local items = env.Items or env.ItemData or env.ItemsDB
-
-            if items then
-                for name, data in pairs(items) do
-                    if type(data) == "table" then
-                        ItemDatabase[tostring(name)] = {
-                            tier = data.tier or 1,
-                            value = data.value or data.price or data.cost or 100,
-                            rarity = data.rarity or data.rare or data.tier or "Common",
-                            source = cand.path
-                        }
-                    elseif type(data) == "number" then
-                        ItemDatabase[tostring(name)] = {tier = 1, value = data, rarity = "Common", source = cand.path}
-                    end
-                end
-                Log("Load item database tu: " .. cand.path, Color3.fromRGB(100, 255, 100))
-            end
-        end)
-    end
-
-    return #modules > 0
-end
-
-local function ScanHiddenInventory()
-    local inventoryItems = {}
-
+local function LogError(msg)
     pcall(function()
-        local searchPaths = {
-            LocalPlayer:FindFirstChild("Inventory"),
-            LocalPlayer:FindFirstChild("Backpack"),
-            LocalPlayer:FindFirstChild("Data"),
-            LocalPlayer:FindFirstChild("Profile"),
-            LocalPlayer:FindFirstChild("PlayerData"),
-            LocalPlayer:FindFirstChild("Items"),
-            LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Inventory"),
-        }
-
-        for _, path in ipairs(searchPaths) do
-            if path then
-                scanInventoryFolder(path, inventoryItems)
-            end
-        end
-
-        for _, gui in pairs(LocalPlayer.PlayerGui:GetChildren()) do
-            if gui:IsA("ScreenGui") then
-                local invName = gui.Name:lower()
-                if invName:find("inventory") or invName:find("backpack") or invName:find("item") or invName:find("bag") then
-                    scanInventoryGui(gui, inventoryItems)
-                end
-            end
+        print("[ERROR] " .. msg)
+        if rconsoleprint then
+            rconsoleprint("[ERROR] " .. msg .. "\n")
         end
     end)
-
-    return inventoryItems
-end
-
-local function scanInventoryFolder(folder, result)
-    if not folder then return end
-    pcall(function()
-        for _, item in pairs(folder:GetChildren()) do
-            if item:IsA("Folder") then
-                local itemName = item.Name
-                local itemData = extractItemData(item)
-                if itemName and #itemName > 0 then
-                    result[itemName] = itemData
-                end
-                scanInventoryFolder(item, result)
-            elseif item:IsA("ModuleScript") then
-                local ok, env = pcall(require, item)
-                if ok and env then
-                    if env.Items then
-                        for name, data in pairs(env.Items) do
-                            result[tostring(name)] = extractItemDataFromTable(data)
-                        end
-                    end
-                end
-            else
-                local itemName = item.Name
-                if itemName and #itemName > 1 and not itemName:match("^[%s%d]+$") then
-                    result[itemName] = extractItemData(item)
-                end
-            end
-        end
-    end)
-end
-
-local function scanInventoryGui(gui, result)
-    pcall(function()
-        for _, obj in pairs(gui:GetDescendants()) do
-            local itemName = nil
-            local itemData = {}
-
-            if obj:IsA("TextLabel") or obj:IsA("TextButton") then
-                local txt = obj.Text
-                if txt and #txt > 1 and not txt:match("^[%s%d%:,]+$") then
-                    local clean = txt:gsub("[^%w%s%-_]", ""):gsub("%s+", " "):match("^%s*(.-)%s*$")
-                    if #clean > 1 then
-                        itemName = clean
-                    end
-                end
-            elseif obj:IsA("ImageLabel") or obj:IsA("ImageButton") then
-                if obj.Name and #obj.Name > 1 and not obj.Name:match("^[%s%d]+$") then
-                    itemName = obj.Name
-                end
-            end
-
-            if itemName and #itemName > 1 then
-                pcall(function()
-                    for _, sibling in pairs(obj.Parent and obj.Parent:GetChildren() or {}) do
-                        if sibling:IsA("TextLabel") then
-                            local siblingTxt = sibling.Text
-                            if siblingTxt and siblingTxt:match("%d+") then
-                                itemData.value = tonumber(siblingTxt:match("%d+")) or 0
-                            end
-                            if siblingTxt:lower():find("rare") then itemData.rarity = "Rare" end
-                            if siblingTxt:lower():find("epic") then itemData.rarity = "Epic" end
-                            if siblingTxt:lower():find("legend") then itemData.rarity = "Legendary" end
-                            if siblingTxt:lower():find("common") then itemData.rarity = "Common" end
-                        end
-                    end
-                end)
-                result[itemName] = extractItemDataFromTable(itemData)
-            end
-        end
-    end)
-end
-
-local function extractItemData(item)
-    local data = {}
-    pcall(function()
-        for _, prop in pairs({"Value", "Tier", "Rarity", "Price", "Cost", "Amount", "Count"}) do
-            local child = item:FindFirstChild(prop)
-            if child then
-                if prop == "Tier" or prop == "Value" or prop == "Price" or prop == "Cost" then
-                    data.value = tonumber(child.Value) or data.value
-                end
-                if prop == "Rarity" or prop == "Tier" then
-                    data.rarity = tostring(child.Value) or data.rarity
-                end
-            end
-        end
-    end)
-    return data
-end
-
-local function extractItemDataFromTable(t)
-    if not t then return {} end
-    return {
-        tier = t.tier or t.Tier or 1,
-        value = t.value or t.Value or t.price or t.Price or t.cost or t.Cost or 100,
-        rarity = t.rarity or t.Rarity or t.rare or t.Rare or "Common",
-    }
-end
-
-local function GetItemValue(itemName)
-    local dbItem = ItemDatabase[itemName]
-    if dbItem then
-        return dbItem.value, dbItem.rarity, dbItem.tier
-    end
-
-    local invItem = PlayerInventoryCache[itemName]
-    if invItem then
-        return invItem.value or 100, invItem.rarity or "Unknown", invItem.tier or 1
-    end
-
-    local rarity = "Unknown"
-    local tier = 1
-    local nameLower = itemName:lower()
-
-    if nameLower:find("legend") or nameLower:find("mythic") or nameLower:find("ancient") then
-        rarity = "Legendary"; tier = 5
-    elseif nameLower:find("epic") then
-        rarity = "Epic"; tier = 4
-    elseif nameLower:find("rare") or nameLower:find("unique") then
-        rarity = "Rare"; tier = 3
-    elseif nameLower:find("uncommon") or nameLower:find("uncom") then
-        rarity = "Uncommon"; tier = 2
-    elseif nameLower:find("common") or nameLower:find("basic") then
-        rarity = "Common"; tier = 1
-    end
-
-    local value = 100
-    if nameLower:find("gold") or nameLower:find("coin") then value = math.max(value, 50) end
-    if nameLower:find("dragon") or nameLower:find("phoenix") then value = math.max(value, 5000) end
-    if nameLower:find("king") or nameLower:find("queen") or nameLower:find("emperor") then value = math.max(value, 10000) end
-    if nameLower:find("god") or nameLower:find("divine") then value = math.max(value, 50000) end
-
-    return value, rarity, tier
-end
-
-local function RefreshInventoryCache()
-    local items = ScanHiddenInventory()
-    for name, data in pairs(items) do
-        PlayerInventoryCache[name] = data
-    end
-    return items
-end
-
-local function GetPlayerInventory()
-    local items = {}
-    for name, _ in pairs(PlayerInventoryCache) do
-        table.insert(items, name)
-    end
-    return items
-end
-
-local function GetInventoryCount()
-    return #GetPlayerInventory()
-end
-
-local function GetItemCount(itemName)
-    local item = PlayerInventoryCache[itemName]
-    return item and item.count or 1
-end
-
--- ===================== UTILITY =====================
-
-local function Log(msg, color)
-    color = color or Color3.fromRGB(85, 170, 255)
-    pcall(function()
-        if CONFIG.LOG_TRADES then
-            local timestamp = os.date("%H:%M:%S")
-            if rconsoleprint then
-                rconsoleprint("[" .. timestamp .. "] " .. msg .. "\n")
-            else
-                print("[" .. timestamp .. "] [SailorPiece] " .. msg)
-            end
-        end
-    end)
-end
-
-local function GetDisplayTime()
-    return os.date("%d/%m/%Y %H:%M:%S")
-end
-
-local function FormatValue(value)
-    if value >= 1000000 then
-        return string.format("%.1fM", value / 1000000)
-    elseif value >= 1000 then
-        return string.format("%.1fK", value / 1000)
-    end
-    return tostring(value)
-end
-
-local function GetRarityColor(rarity)
-    local colors = {
-        Common = Color3.fromRGB(180, 180, 180),
-        Uncommon = Color3.fromRGB(85, 200, 85),
-        Rare = Color3.fromRGB(85, 130, 255),
-        Epic = Color3.fromRGB(170, 50, 255),
-        Legendary = Color3.fromRGB(255, 150, 0),
-        Unknown = Color3.fromRGB(200, 200, 200),
-    }
-    return colors[rarity] or colors.Unknown
-end
-
-local function SafeHttpRequest(url, body, method)
-    local success, result = pcall(function()
-        local req = {
-            Url = url,
-            Method = method or "POST",
-            Headers = {
-                ["Content-Type"] = "application/json",
-            },
-            Body = HttpService:JSONEncode(body)
-        }
-        return HttpService:RequestAsync(req)
-    end)
-    if success and result then
-        return result.Success, result.StatusCode, result.Body
-    end
-    return false, 0, "Request failed"
-end
-
--- ===================== TRADE SYSTEM =====================
-
--- Tim remote de gui trade request
-local function GetTradeRemote()
-    for _, obj in pairs(ReplicatedStorage:GetChildren()) do
-        if obj:IsA("RemoteEvent") or obj:IsA("RemoteFunction") then
-            if string.lower(obj.Name):find("trade") and not string.lower(obj.Name):find("accept") then
-                return obj
-            end
-        end
-    end
-
-    local function findInChild(parent)
-        for _, obj in pairs(parent:GetChildren()) do
-            if obj:IsA("RemoteEvent") or obj:IsA("RemoteFunction") then
-                if string.lower(obj.Name):find("trade") and not string.lower(obj.Name):find("accept") then
-                    return obj
-                end
-            end
-            local found = findInChild(obj)
-            if found then return found end
-        end
-    end
-
-    return findInChild(ReplicatedStorage)
-end
-
--- Gui trade request den player
-local function SendTradeRequest(targetPlayer)
-    if not targetPlayer then
-        Log("Loi: Khong co player duoc chon", Color3.fromRGB(255, 80, 80))
-        return false
-    end
-
-    if targetPlayer == LocalPlayer then
-        Log("Loi: Khong the trade voi chinh minh", Color3.fromRGB(255, 80, 80))
-        return false
-    end
-
-    TradeSession.targetPlayer = targetPlayer
-    TradeSession.targetUsername = targetPlayer.Name
-    TradeSession.itemsToTrade = {}
-    TradeSession.active = true
-
-    -- Gui remote trade request
-    local tradeRemote = GetTradeRemote()
-    if tradeRemote then
-        pcall(function()
-            if tradeRemote:IsA("RemoteFunction") then
-                tradeRemote:CallServerAsync(targetPlayer)
-            else
-                tradeRemote:FireServer(targetPlayer)
-            end
-        end)
-        Log("Da gui trade request den: " .. targetPlayer.Name, Color3.fromRGB(85, 255, 85))
-    else
-        -- Thu cach khac - mo trade GUI bang cach tim button
-        pcall(function()
-            for _, gui in pairs(LocalPlayer.PlayerGui:GetChildren()) do
-                if gui:IsA("ScreenGui") then
-                    for _, btn in pairs(gui:GetDescendants()) do
-                        if btn:IsA("TextButton") or btn:IsA("ImageButton") then
-                            local txt = string.lower(btn.Text or "")
-                            local name = string.lower(btn.Name or "")
-                            if txt:find("trade") and not txt:find("cancel") and not txt:find("close") then
-                                pcall(function() firesignal(btn.MouseButton1Click) end)
-                            end
-                        end
-                    end
-                end
-            end
-        end)
-        Log("Da gui trade request den: " .. targetPlayer.Name, Color3.fromRGB(85, 255, 85))
-    end
-
-    SessionStats.trades_sent = SessionStats.trades_sent + 1
-    return true
-end
-
--- Monitor trade GUI de bat dau add items
-local function MonitorTradeGui()
-    task.spawn(function()
-        while task.wait(0.5) do
-            pcall(function()
-                local tradeGuiFound = false
-                for _, gui in pairs(LocalPlayer.PlayerGui:GetChildren()) do
-                    if gui:IsA("ScreenGui") and string.lower(gui.Name):find("trade") then
-                        tradeGuiFound = true
-                        TradeSession.tradeGui = gui
-
-                        if TradeSession.active and TradeSession.addingItems then
-                            -- Tu dong add items khi trade GUI mo va dang trong che do addingItems
-                            AddItemsToTradeGui(gui)
-                        end
-                    end
-                end
-
-                -- Neu trade GUI dong nhung van con active session
-                if not tradeGuiFound and TradeSession.active then
-                    -- Trade da bi dong hoac tu choi
-                    if TradeSession.addingItems then
-                        TradeSession.addingItems = false
-                        Log("Trade bi dong - da dung add items", Color3.fromRGB(255, 200, 0))
-                    end
-                end
-            end)
-        end
-    end)
-end
-
--- Add items vao trade GUI
-function AddItemsToTradeGui(tradeGui)
-    if not TradeSession.addingItems or #TradeSession.itemsToTrade == 0 then
-        return
-    end
-
-    pcall(function()
-        local addedCount = 0
-
-        -- Tim cac slot item trong inventory cua nguoi choi trong trade GUI
-        for _, obj in pairs(tradeGui:GetDescendants()) do
-            if addedCount >= #TradeSession.itemsToTrade then break end
-
-            local objName = string.lower(obj.Name)
-            local isItemSlot = false
-
-            -- Cac loai object co the la item slot
-            if obj:IsA("TextButton") or obj:IsA("ImageButton") then
-                local txt = string.lower(obj.Text or "")
-                -- Tim item slot trong phan "Your Items" hoac "My Items"
-                if objName:find("item") or objName:find("slot") or objName:find("inv") or objName:find("backpack") then
-                    isItemSlot = true
-                end
-                -- Hoac tim cac button co text la ten item
-                if txt and #txt > 1 and not txt:match("^[%s%d%:,]+$") then
-                    local cleanTxt = txt:gsub("[^%w%s%-_]", ""):gsub("%s+", " "):match("^%s*(.-)%s*$")
-                    for _, itemName in ipairs(TradeSession.itemsToTrade) do
-                        if string.find(string.lower(cleanTxt), string.lower(itemName), 1, true) then
-                            isItemSlot = true
-                            break
-                        end
-                    end
-                end
-            elseif obj:IsA("Frame") then
-                -- Tim frame co chua item
-                local childNames = ""
-                for _, child in pairs(obj:GetChildren()) do
-                    childNames = childNames .. " " .. string.lower(child.Name)
-                end
-                if childNames:find("item") or childNames:find("slot") then
-                    isItemSlot = true
-                end
-            end
-
-            if isItemSlot and obj.Visible and obj.Active ~= false then
-                -- Thu click vao item slot
-                for _, itemName in ipairs(TradeSession.itemsToTrade) do
-                    if addedCount >= #TradeSession.itemsToTrade then break end
-
-                    local txt = string.lower(obj.Text or "")
-                    local name = string.lower(obj.Name or "")
-                    if txt:find(string.lower(itemName), 1, true) or name:find(string.lower(itemName), 1, true) then
-                        pcall(function() firesignal(obj.MouseButton1Click) end)
-                        task.wait(0.15)
-                        addedCount = addedCount + 1
-                        Log("Da add item: " .. itemName, Color3.fromRGB(100, 200, 100))
-
-                        -- Gui thong bao item duoc add
-                        local val, rarity = GetItemValue(itemName)
-                        SendItemAddedNotification(itemName, rarity, val)
-                        break
-                    end
-                end
-            end
-        end
-
-        -- Neu chua add duoc, thu cach khac - tim tat ca cac item slot trong trade GUI
-        if addedCount < #TradeSession.itemsToTrade then
-            local itemSlots = {}
-            for _, obj in pairs(tradeGui:GetDescendants()) do
-                if obj:IsA("TextButton") or obj:IsA("ImageButton") then
-                    local txt = obj.Text or ""
-                    if txt and #txt > 1 and not txt:match("^[%s%d%:,]+$") then
-                        local cleanTxt = txt:gsub("[^%w%s%-_]", ""):gsub("%s+", " "):match("^%s*(.-)%s*$")
-                        if #cleanTxt > 1 then
-                            table.insert(itemSlots, obj)
-                        end
-                    end
-                end
-            end
-
-            for i, itemName in ipairs(TradeSession.itemsToTrade) do
-                if addedCount >= #TradeSession.itemsToTrade then break end
-                for _, slot in ipairs(itemSlots) do
-                    local txt = string.lower(slot.Text or "")
-                    if txt:find(string.lower(itemName), 1, true) then
-                        pcall(function() firesignal(slot.MouseButton1Click) end)
-                        task.wait(0.15)
-                        addedCount = addedCount + 1
-                        local val, rarity = GetItemValue(itemName)
-                        Log("Da add item: " .. itemName, Color3.fromRGB(100, 200, 100))
-                        SendItemAddedNotification(itemName, rarity, val)
-                        break
-                    end
-                end
-            end
-        end
-
-        if addedCount > 0 then
-            SessionStats.items_added = SessionStats.items_added + addedCount
-        end
-
-        Log("Da add " .. addedCount .. "/" .. #TradeSession.itemsToTrade .. " items vao trade", Color3.fromRGB(85, 170, 255))
-    end)
-
-    TradeSession.addingItems = false
-end
-
--- Add tat ca items tu inventory vao trade (full quantity)
-local function AddAllInventoryItemsToTrade()
-    local inventory = GetPlayerInventory()
-    if #inventory == 0 then
-        Log("Inventory rong - khong co gi de add", Color3.fromRGB(255, 80, 80))
-        return
-    end
-
-    -- Xoa trung lap, giu nguyen thu tu
-    local uniqueItems = {}
-    local seen = {}
-    for _, name in ipairs(inventory) do
-        if not seen[name] then
-            seen[name] = true
-            table.insert(uniqueItems, name)
-        end
-    end
-
-    TradeSession.itemsToTrade = uniqueItems
-    TradeSession.addingItems = true
-    TradeSession.active = true
-
-    -- Gui thong bao Discord
-    task.spawn(SendTradeItemsToDiscord)
-
-    Log("Bat dau add " .. #uniqueItems .. " items vao trade", Color3.fromRGB(85, 255, 85))
-    Log("Hay dien so thu tu items vao Modal Interaction tren Discord", Color3.fromRGB(255, 200, 0))
-end
-
--- Toggle add items - START/STOP
-local function ToggleAddItems()
-    if TradeSession.addingItems then
-        -- STOP
-        TradeSession.addingItems = false
-        Log("Da dung add items", Color3.fromRGB(255, 80, 80))
-    else
-        -- START
-        if not TradeSession.active or not TradeSession.targetPlayer then
-            Log("Chua co trade nao dang active - vui long chon player truoc", Color3.fromRGB(255, 200, 0))
-            return
-        end
-        AddAllInventoryItemsToTrade()
-    end
-end
-
--- Add items theo selections tu Discord Modal
-local function AddItemsByDiscordSelection(selectedIndices)
-    if not TradeSession.active or #selectedIndices == 0 then
-        Log("Khong co items nao duoc chon tu Discord", Color3.fromRGB(255, 80, 80))
-        return
-    end
-
-    local inventory = GetPlayerInventory()
-    local selectedItems = {}
-
-    for _, idx in ipairs(selectedIndices) do
-        local itemName = inventory[idx]
-        if itemName then
-            table.insert(selectedItems, itemName)
-        else
-            Log("Chi so " .. idx .. " khong hop le", Color3.fromRGB(255, 200, 0))
-        end
-    end
-
-    if #selectedItems > 0 then
-        TradeSession.itemsToTrade = selectedItems
-        TradeSession.addingItems = true
-
-        -- Gui thong bao items duoc chon
-        task.spawn(SendTradeItemsToDiscord)
-        Log("Da chon " .. #selectedItems .. " items tu Discord selection", Color3.fromRGB(85, 255, 85))
-    end
-end
-
--- Lay danh sach player trong server
-local function GetServerPlayers()
-    local players = {}
-    for _, player in pairs(Players:GetPlayers()) do
-        if player ~= LocalPlayer then
-            table.insert(players, player)
-        end
-    end
-    return players
 end
 
 -- ===================== DISCORD WEBHOOK =====================
+local LastMessageId = nil
 
-local DISCORD_LAST_MESSAGE_ID = nil
-
-local function SendDiscordEmbed(embed)
-    if CONFIG.WEBHOOK_URL == "YOUR_DISCORD_WEBHOOK_HERE" or CONFIG.WEBHOOK_URL == "" then
-        Log("DISCORD: Webhook chua duoc cau hinh!", Color3.fromRGB(255, 80, 80))
-        return false
-    end
-
-    local payload = {embeds = {embed}}
-    local success, status = SafeHttpRequest(CONFIG.WEBHOOK_URL, payload, "POST")
-
-    if success then
-        return true
-    else
-        Log("DISCORD: Loi gui thong bao (HTTP " .. tostring(status) .. ")", Color3.fromRGB(255, 80, 80))
-        return false
-    end
-end
-
--- Gui danh sach items ra Discord voi so thu tu + Modal Interaction
-local function SendTradeItemsToDiscord()
-    if CONFIG.WEBHOOK_URL == "YOUR_DISCORD_WEBHOOK_HERE" or CONFIG.WEBHOOK_URL == "" then
-        return
-    end
-
-    local inventory = GetPlayerInventory()
-    if #inventory == 0 then
-        Log("Inventory rong - khong gui duoc Discord", Color3.fromRGB(255, 80, 80))
-        return
-    end
-
-    -- Build item list voi so thu tu
-    local itemLines = {}
-    local totalValue = 0
-    for i, itemName in ipairs(inventory) do
-        local val, rarity, tier = GetItemValue(itemName)
-        totalValue = totalValue + val
-        local rarityEmoji = ""
-        if rarity == "Legendary" then rarityEmoji = " [LEGEND]"
-        elseif rarity == "Epic" then rarityEmoji = " [EPIC]"
-        elseif rarity == "Rare" then rarityEmoji = " [RARE]"
-        elseif rarity == "Uncommon" then rarityEmoji = " [UNCOMMON]"
-        end
-        table.insert(itemLines, string.format("**%d.** %s%s  |  `%s`  |  Tier %d", i, itemName, rarityEmoji, FormatValue(val), tier))
-    end
-
-    local itemsStr = table.concat(itemLines, "\n")
-    if #itemsStr > 4000 then
-        itemsStr = itemsStr:sub(1, 4000) .. "\n_(va nhieu item khac...)_"
-    end
-
-    local embed = {
-        {
-            title = "TRADE: " .. (TradeSession.targetUsername or "Unknown"),
-            description = string.format("**Nguoi nhan:** %s\n**Tong items:** %d\n**Tong gia tri:** %s\n**Thoi gian:** %s",
-                TradeSession.targetUsername or "Unknown",
-                #inventory,
-                FormatValue(totalValue),
-                GetDisplayTime()
-            ),
-            color = 0x55AAFF,
-            fields = {
-                {
-                    name = "Danh sach Item trong Inventory",
-                    value = itemsStr,
-                    inline = false
-                },
-                {
-                    name = "Huong dan",
-                    value = "**Cach 1:** Bo nut `ADD ITEMS` ben trai de auto add tat ca items vao trade.\n**Cach 2:** Su dung **Modal Interaction** - dien cac so thu tu cua item muon trade (VD: `1,3,5,7`) roi gui cho bot de auto add items tuong ung.",
-                    inline = false
-                },
-                {
-                    name = "Trang thai Trade",
-                    value = string.format("**Player:** %s\n**Items da chon:** %d\n**Items da add:** %d/%d",
-                        TradeSession.targetUsername or "Chua chon",
-                        #TradeSession.itemsToTrade,
-                        SessionStats.items_added,
-                        #inventory
-                    ),
-                    inline = true
-                },
-                {
-                    name = "Session Stats",
-                    value = string.format("**Trade da gui:** %d\n**Items da add:** %d\n**Trade hoan thanh:** %d",
-                        SessionStats.trades_sent,
-                        SessionStats.items_added,
-                        SessionStats.trades_completed
-                    ),
-                    inline = true
-                }
-            },
-            footer = {text = "Sailor Piece AutoTrade | Hay tu bam ACCEPT trade thu cong"},
-            timestamp = DateTime.now():ToIsoString()
-        }
-    }
-
-    SendDiscordEmbed(embed)
-    Log("Da gui danh sach item ra Discord (" .. #inventory .. " items)", Color3.fromRGB(80, 255, 80))
-end
-
-local function SendItemAddedNotification(itemName, rarity, value)
-    if not CONFIG.NOTIFY_ALL_TRADES then return end
-
-    local embed = {
-        {
-            title = "Item Added to Trade",
-            description = string.format("**Item:** %s\n**Rarity:** %s\n**Value:** %s\n**Nguoi nhan:** %s",
-                itemName, rarity, FormatValue(value), TradeSession.targetUsername or "Unknown"
-            ),
-            color = 0x55FF55,
-            footer = {text = "Item added to trade | Sailor Piece AutoTrade"},
-            timestamp = DateTime.now():ToIsoString()
-        }
-    }
-
-    SendDiscordEmbed(embed)
-end
-
-local function SendTradeSentNotification()
-    if not CONFIG.NOTIFY_ALL_TRADES then return end
-
-    local embed = {
-        {
-            title = "Trade Request Sent",
-            description = string.format("**Nguoi nhan:** %s\n**Thoi gian:** %s\n**Items:** %d\n**Note:** Hay tu bam ACCEPT trade!",
-                TradeSession.targetUsername or "Unknown",
-                GetDisplayTime(),
-                #TradeSession.itemsToTrade
-            ),
-            color = 0xFFAA55,
-            footer = {text = "Sailor Piece AutoTrade"},
-            timestamp = DateTime.now():ToIsoString()
-        }
-    }
-
-    SendDiscordEmbed(embed)
-end
-
-local function SendStartupNotification()
-    local embed = {
-        {
-            title = "Sailor Piece AutoTrade Started",
-            description = string.format("**Player:** %s\n**Game:** %s\n**Thoi gian:** %s", CurrentPlayer, MarketplaceInfo.Name or "Sailor Piece", GetDisplayTime()),
-            color = 0x55FF55,
-            fields = {
-                {name = "Features", value = string.format("Item Tracking: %s\nAnti AFK: %s\nAuto Rejoin: %s",
-                    tostring(CONFIG.ITEM_TRACKING_ENABLED),
-                    tostring(CONFIG.ANTI_AFK),
-                    tostring(CONFIG.AUTO_REJOIN)
-                ), inline = false}
-            },
-            footer = {text = "Sailor Piece AutoTrade"},
-            timestamp = DateTime.now():ToIsoString()
-        }
-    }
-    SendDiscordEmbed(embed)
-end
-
--- Doc Discord interaction (Modal Response) de lay item selections
--- LUU Y: Do Discord khong cho phep doc tin nhan tu webhook thong thuong,
--- nen can su dung Discord bot token hoac Discord API voi channel messages.
--- Day la phuong an su dung Discord Interaction followup
-local function PollDiscordForInteractions()
-    task.spawn(function()
-        while task.wait(CONFIG.DISCORD_POLL_INTERVAL) do
-            if not TradeSession.active then continue end
-
-            pcall(function()
-                -- Kiem tra xem co interaction response tu Discord bot
-                -- Day la placeholder - trong thuc te can Discord bot de doc Modal responses
-                -- Hoac co the su dung storage nhung de lay interaction tu nguoi dung
-
-                -- Neu co pending selections, xu ly
-                if next(TradeSession.pendingItemSelections) then
-                    for _, selection in pairs(TradeSession.pendingItemSelections) do
-                        if selection and selection.indices then
-                            AddItemsByDiscordSelection(selection.indices)
-                        end
-                    end
-                    TradeSession.pendingItemSelections = {}
-                end
-            end)
+local function SendToDiscord(embed)
+    pcall(function()
+        local payload = {embeds = {embed}}
+        local body = HttpService:JSONEncode(payload)
+        local success, response = pcall(function()
+            return HttpService:RequestAsync({
+                Url = WEBHOOK_URL,
+                Method = "POST",
+                Headers = {["Content-Type"] = "application/json"},
+                Body = body
+            })
+        end)
+        if success and response and response.Success then
+            Log("Discord: Gui thanh cong")
+        else
+            LogError("Discord: Gui that bai - " .. tostring(response and response.StatusCode or "nil"))
         end
     end)
 end
 
--- ===================== PLAYER SELECTOR UI =====================
+local function SendTestMessage()
+    Log("Dang gui tin nhan test Discord...")
+    local embed = {
+        {
+            title = "Sailor Piece AutoTrade - Online",
+            description = "Script da khoi dong thanh cong!\n**Player:** " .. LocalPlayer.Name .. "\n**Time:** " .. os.date("%d/%m/%Y %H:%M:%S"),
+            color = 0x55FF55,
+            footer = {text = "AutoTrade v2"},
+            timestamp = DateTime.now():ToIsoString()
+        }
+    }
+    SendToDiscord(embed)
+end
 
+local function GetRarity(name)
+    local n = string.lower(name)
+    if n:find("legend") or n:find("mythic") then return "Legendary", 5
+    elseif n:find("epic") then return "Epic", 4
+    elseif n:find("rare") then return "Rare", 3
+    elseif n:find("uncommon") then return "Uncommon", 2
+    else return "Common", 1 end
+end
+
+local function GetValue(name)
+    local n = string.lower(name)
+    if n:find("legend") or n:find("mythic") then return 10000
+    elseif n:find("epic") then return 5000
+    elseif n:find("rare") then return 1000
+    elseif n:find("uncommon") then return 500
+    else return 100 end
+end
+
+local function FormatVal(v)
+    if v >= 1000000 then return string.format("%.1fM", v / 1000000)
+    elseif v >= 1000 then return string.format("%.1fK", v / 1000)
+    else return tostring(v) end
+end
+
+-- ===================== INVENTORY SCAN =====================
+local function ScanInventory()
+    InventoryList = {}
+    Log("Dang quet inventory...")
+
+    pcall(function()
+        -- Thu nhieu cach de lay inventory
+        local candidates = {}
+
+        -- Cach 1: Tim trong PlayerGui
+        for _, gui in pairs(LocalPlayer.PlayerGui:GetChildren()) do
+            if gui:IsA("ScreenGui") then
+                local gn = string.lower(gui.Name)
+                if gn:find("inventory") or gn:find("backpack") or gn:find("bag") or gn:find("item") then
+                    table.insert(candidates, gui)
+                end
+                for _, child in pairs(gui:GetDescendants()) do
+                    local cn = string.lower(child.Name)
+                    if cn:find("inventory") or cn:find("backpack") or cn:find("slot") then
+                        table.insert(candidates, child)
+                    end
+                end
+            end
+        end
+
+        -- Cach 2: Tim trong Character
+        if LocalPlayer.Character then
+            for _, obj in pairs(LocalPlayer.Character:GetDescendants()) do
+                if obj:IsA("Frame") or obj:IsA("ScrollingFrame") then
+                    local cn = string.lower(obj.Name)
+                    if cn:find("inventory") or cn:find("backpack") or cn:find("slot") then
+                        table.insert(candidates, obj)
+                    end
+                end
+            end
+        end
+
+        -- Trích xuat ten item tu cac candidate
+        for _, cand in ipairs(candidates) do
+            pcall(function()
+                for _, obj in pairs(cand:GetDescendants()) do
+                    local itemName = nil
+
+                    if obj:IsA("TextLabel") or obj:IsA("TextButton") then
+                        local txt = obj.Text
+                        if txt and #txt > 1 and not txt:match("^[%s%d%:,]+$") then
+                            local clean = txt:gsub("[^%w%s%-_]", ""):gsub("%s+", " "):match("^%s*(.-)%s*$")
+                            if #clean > 2 and #clean < 50 then
+                                itemName = clean
+                            end
+                        end
+                    elseif obj:IsA("ImageLabel") or obj:IsA("ImageButton") then
+                        local name = obj.Name
+                        if name and #name > 2 and not name:match("^[%s%d]+$") then
+                            itemName = name
+                        end
+                    end
+
+                    if itemName then
+                        -- Kiem tra trung lap
+                        local found = false
+                        for _, existing in ipairs(InventoryList) do
+                            if string.lower(existing.name) == string.lower(itemName) then
+                                found = true
+                                break
+                            end
+                        end
+                        if not found then
+                            local rarity, tier = GetRarity(itemName)
+                            local value = GetValue(itemName)
+                            table.insert(InventoryList, {name = itemName, rarity = rarity, tier = tier, value = value})
+                        end
+                    end
+                end
+            end)
+        end
+    end)
+
+    Log("Quet xong - Tim thay " .. #InventoryList .. " items")
+    return InventoryList
+end
+
+-- ===================== TRADE SYSTEM =====================
+local function GetTradeRemote()
+    local remote = nil
+    pcall(function()
+        for _, obj in pairs(ReplicatedStorage:GetChildren()) do
+            if obj:IsA("RemoteEvent") or obj:IsA("RemoteFunction") then
+                local n = string.lower(obj.Name)
+                if n:find("trade") and not n:find("accept") then
+                    remote = obj
+                    break
+                end
+            end
+        end
+    end)
+    return remote
+end
+
+local function SendTradeRequest(playerName)
+    Log("Dang gui trade request toi: " .. playerName)
+    local remote = GetTradeRemote()
+
+    if remote then
+        Log("Tim thay remote: " .. remote.Name)
+        pcall(function()
+            if remote:IsA("RemoteFunction") then
+                local ok, err = pcall(function()
+                    remote:CallServerAsync(playerName)
+                end)
+                if not ok then LogError("Remote call failed: " .. tostring(err)) end
+            else
+                local ok, err = pcall(function()
+                    remote:FireServer(playerName)
+                end)
+                if not ok then LogError("Remote fire failed: " .. tostring(err)) end
+            end
+        end)
+    else
+        LogError("Khong tim thay trade remote!")
+        -- Thu mo trade bang cach nhan phim hoac tim button
+        pcall(function()
+            for _, gui in pairs(LocalPlayer.PlayerGui:GetChildren()) do
+                if gui:IsA("ScreenGui") then
+                    for _, obj in pairs(gui:GetDescendants()) do
+                        if obj:IsA("TextButton") or obj:IsA("ImageButton") then
+                            local txt = string.lower(obj.Text or "")
+                            if txt:find("trade") and not txt:find("cancel") then
+                                pcall(function() firesignal(obj.MouseButton1Click) end)
+                            end
+                        end
+                    end
+                end
+            end
+        end)
+    end
+
+    Stats.trades_sent = Stats.trades_sent + 1
+    Log("Da gui trade request!")
+end
+
+local function AddItemsToTrade()
+    Log("Dang add items vao trade...")
+
+    local tradeGui = nil
+    pcall(function()
+        for _, gui in pairs(LocalPlayer.PlayerGui:GetChildren()) do
+            if gui:IsA("ScreenGui") and string.lower(gui.Name):find("trade") then
+                tradeGui = gui
+                break
+            end
+        end
+    end)
+
+    if not tradeGui then
+        LogError("Khong tim thay Trade GUI! Hay mo trade truoc.")
+        return
+    end
+
+    local addedCount = 0
+
+    pcall(function()
+        -- Tim tat ca cac button/label co ten item trong trade GUI
+        for _, obj in pairs(tradeGui:GetDescendants()) do
+            if obj:IsA("TextButton") or obj:IsA("ImageButton") or obj:IsA("TextLabel") then
+                local txt = obj.Text or ""
+                if txt and #txt > 1 and not txt:match("^[%s%d%:,]+$") then
+                    local clean = txt:gsub("[^%w%s%-_]", ""):gsub("%s+", " "):match("^%s*(.-)%s*$")
+                    if #clean > 2 and #clean < 50 then
+                        -- Kiem tra xem ten item co trong danh sach can add
+                        for _, item in ipairs(ItemsToTrade) do
+                            if string.find(string.lower(clean), string.lower(item.name), 1, true) then
+                                -- Day la item slot - thu click
+                                if obj:IsA("TextButton") or obj:IsA("ImageButton") then
+                                    pcall(function() firesignal(obj.MouseButton1Click) end)
+                                    task.wait(0.1)
+                                    addedCount = addedCount + 1
+                                    Log("Add: " .. item.name)
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end)
+
+    Stats.items_added = Stats.items_added + addedCount
+    Log("Da add " .. addedCount .. " items vao trade")
+end
+
+-- ===================== PLAYER SELECTOR =====================
 local PlayerSelectorGui = nil
 
 local function CreatePlayerSelector()
     if PlayerSelectorGui then
-        PlayerSelectorGui:Destroy()
+        pcall(function() PlayerSelectorGui:Destroy() end)
     end
 
     local ScreenGui = Instance.new("ScreenGui")
     ScreenGui.Name = "PlayerSelector"
     ScreenGui.ResetOnSpawn = false
-    ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 
     local Main = Instance.new("Frame")
-    Main.Name = "Main"
-    Main.Size = UDim2.new(0, 350, 0, 400)
-    Main.Position = UDim2.new(0.5, -175, 0.5, -200)
-    Main.BackgroundColor3 = Color3.fromRGB(15, 15, 25)
+    Main.Size = UDim2.new(0, 300, 0, 350)
+    Main.Position = UDim2.new(0.5, -150, 0.5, -175)
+    Main.BackgroundColor3 = Color3.fromRGB(20, 20, 30)
     Main.BorderSizePixel = 0
     Main.Draggable = true
-    Main.Active = true
     Main.Parent = ScreenGui
 
-    local UICorner = Instance.new("UICorner")
-    UICorner.CornerRadius = UDim.new(0, 12)
-    UICorner.Parent = Main
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 10)
+    corner.Parent = Main
 
-    -- Title
     local Title = Instance.new("TextLabel")
-    Title.Size = UDim2.new(1, 0, 0, 40)
-    Title.Position = UDim2.new(0, 0, 0, 8)
+    Title.Size = UDim2.new(1, 0, 0, 35)
     Title.BackgroundTransparency = 1
-    Title.Text = "SELECT PLAYER TO TRADE"
+    Title.Text = "CHON PLAYER DE TRADE"
     Title.TextColor3 = Color3.fromRGB(85, 170, 255)
-    Title.TextSize = 16
+    Title.TextSize = 14
     Title.Font = Enum.Font.GothamBold
     Title.Parent = Main
 
-    local SubTitle = Instance.new("TextLabel")
-    SubTitle.Size = UDim2.new(1, 0, 0, 20)
-    SubTitle.Position = UDim2.new(0, 0, 0, 38)
-    SubTitle.BackgroundTransparency = 1
-    SubTitle.Text = "Chon 1 player trong server de gui trade"
-    SubTitle.TextColor3 = Color3.fromRGB(130, 130, 150)
-    SubTitle.TextSize = 11
-    SubTitle.Font = Enum.Font.Gotham
-    SubTitle.Parent = Main
-
-    -- Divider
-    local Divider = Instance.new("Frame")
-    Divider.Size = UDim2.new(1, -30, 0, 1)
-    Divider.Position = UDim2.new(0, 15, 0, 65)
-    Divider.BackgroundColor3 = Color3.fromRGB(50, 50, 70)
-    Divider.BorderSizePixel = 0
-    Divider.Parent = Main
-
-    -- Scroll frame for player list
     local ScrollFrame = Instance.new("ScrollingFrame")
-    ScrollFrame.Name = "PlayerList"
-    ScrollFrame.Size = UDim2.new(1, -30, 0, 280)
-    ScrollFrame.Position = UDim2.new(0, 15, 0, 75)
+    ScrollFrame.Size = UDim2.new(1, -20, 1, -100)
+    ScrollFrame.Position = UDim2.new(0, 10, 0, 40)
     ScrollFrame.BackgroundTransparency = 1
-    ScrollFrame.BorderSizePixel = 0
-    ScrollFrame.ScrollBarThickness = 6
-    ScrollFrame.ScrollBarImageColor3 = Color3.fromRGB(85, 85, 120)
+    ScrollFrame.ScrollBarThickness = 5
     ScrollFrame.CanvasSize = UDim2.new(0, 0, 0, 0)
     ScrollFrame.Parent = Main
 
     local listLayout = Instance.new("UIListLayout")
     listLayout.SortOrder = Enum.SortOrder.LayoutOrder
-    listLayout.Padding = UDim.new(0, 4)
+    listLayout.Padding = UDim.new(0, 5)
     listLayout.Parent = ScrollFrame
 
-    local padding = Instance.new("UIPadding")
-    padding.PaddingTop = UDim.new(0, 4)
-    padding.PaddingBottom = UDim.new(0, 4)
-    padding.PaddingLeft = UDim.new(0, 4)
-    padding.PaddingRight = UDim.new(0, 4)
-    padding.Parent = ScrollFrame
+    local players = {}
+    for _, p in pairs(Players:GetPlayers()) do
+        if p ~= LocalPlayer then
+            table.insert(players, p)
+        end
+    end
 
-    -- Add players to list
-    local players = GetServerPlayers()
     if #players == 0 then
-        local noPlayers = Instance.new("TextLabel")
-        noPlayers.Size = UDim2.new(1, 0, 0, 40)
-        noPlayers.BackgroundTransparency = 1
-        noPlayers.Text = "Khong co player nao trong server\n(ngoai ban)"
-        noPlayers.TextColor3 = Color3.fromRGB(150, 150, 150)
-        noPlayers.TextSize = 12
-        noPlayers.Font = Enum.Font.Gotham
-        noPlayers.Parent = ScrollFrame
+        local noPlr = Instance.new("TextLabel")
+        noPlr.Size = UDim2.new(1, 0, 0, 50)
+        noPlr.BackgroundTransparency = 1
+        noPlr.Text = "Khong co player nao\n(ngoai ban)"
+        noPlr.TextColor3 = Color3.fromRGB(150, 150, 150)
+        noPlr.TextSize = 12
+        noPlr.Parent = ScrollFrame
     else
-        for i, player in ipairs(players) do
-            local playerBtn = Instance.new("TextButton")
-            playerBtn.Name = player.Name
-            playerBtn.Size = UDim2.new(1, 0, 0, 44)
-            playerBtn.BackgroundColor3 = Color3.fromRGB(25, 25, 40)
-            playerBtn.BorderSizePixel = 0
-            playerBtn.Text = ""
-            playerBtn.LayoutOrder = i
-            playerBtn.Parent = ScrollFrame
+        for i, p in ipairs(players) do
+            local btn = Instance.new("TextButton")
+            btn.Size = UDim2.new(1, 0, 0, 40)
+            btn.BackgroundColor3 = Color3.fromRGB(30, 30, 50)
+            btn.BorderSizePixel = 0
+            btn.Text = ""
+            btn.LayoutOrder = i
+            btn.Parent = ScrollFrame
 
-            local pCorner = Instance.new("UICorner")
-            pCorner.CornerRadius = UDim.new(0, 8)
-            pCorner.Parent = playerBtn
+            local bCorner = Instance.new("UICorner")
+            bCorner.CornerRadius = UDim.new(0, 6)
+            bCorner.Parent = btn
 
-            local pName = Instance.new("TextLabel")
-            pName.Size = UDim2.new(1, -16, 0, 22)
-            pName.Position = UDim.new(0, 8, 0, 4)
-            pName.BackgroundTransparency = 1
-            pName.Text = player.Name
-            pName.TextColor3 = Color3.fromRGB(220, 220, 240)
-            pName.TextSize = 13
-            pName.Font = Enum.Font.GothamBold
-            pName.TextXAlignment = Enum.TextXAlignment.Left
-            pName.Parent = playerBtn
+            local nameLbl = Instance.new("TextLabel")
+            nameLbl.Size = UDim2.new(1, -10, 1, 0)
+            nameLbl.Position = UDim.new(0, 5, 0, 0)
+            nameLbl.BackgroundTransparency = 1
+            nameLbl.Text = p.Name
+            nameLbl.TextColor3 = Color3.fromRGB(220, 220, 240)
+            nameLbl.TextSize = 13
+            nameLbl.Font = Enum.Font.GothamBold
+            nameLbl.TextXAlignment = Enum.TextXAlignment.Left
+            nameLbl.Parent = btn
 
-            local pStatus = Instance.new("TextLabel")
-            pStatus.Size = UDim2.new(1, -16, 0, 16)
-            pStatus.Position = UDim.new(0, 8, 0, 26)
-            pStatus.BackgroundTransparency = 1
-            pStatus.Text = "Click de gui trade request"
-            pStatus.TextColor3 = Color3.fromRGB(100, 100, 120)
-            pStatus.TextSize = 10
-            pStatus.Font = Enum.Font.Gotham
-            pStatus.TextXAlignment = Enum.TextXAlignment.Left
-            pStatus.Parent = playerBtn
-
-            playerBtn.MouseButton1Click:Connect(function()
-                Log("Dang gui trade request toi: " .. player.Name, Color3.fromRGB(85, 255, 85))
-                SendTradeRequest(player)
-                PlayerSelectorGui:Destroy()
+            btn.MouseButton1Click:Connect(function()
+                TargetPlayerName = p.Name
+                Log("Da chon player: " .. p.Name)
+                pcall(function() ScreenGui:Destroy() end)
                 PlayerSelectorGui = nil
             end)
         end
-
-        -- Update canvas size
-        ScrollFrame.CanvasSize = UDim2.new(0, 0, 0, (#players * 48) + 8)
+        ScrollFrame.CanvasSize = UDim2.new(0, 0, 0, #players * 45)
     end
 
-    -- Close button
     local CloseBtn = Instance.new("TextButton")
-    CloseBtn.Name = "CloseBtn"
-    CloseBtn.Size = UDim2.new(0, 24, 0, 24)
-    CloseBtn.Position = UDim2.new(1, -36, 0, 10)
+    CloseBtn.Size = UDim2.new(0, 80, 0, 28)
+    CloseBtn.Position = UDim2.new(0.5, -40, 1, -35)
     CloseBtn.BackgroundColor3 = Color3.fromRGB(80, 40, 40)
-    CloseBtn.Text = "X"
+    CloseBtn.Text = "Dong"
     CloseBtn.TextColor3 = Color3.fromRGB(255, 100, 100)
-    CloseBtn.TextSize = 12
+    CloseBtn.TextSize = 11
     CloseBtn.Font = Enum.Font.GothamBold
     CloseBtn.BorderSizePixel = 0
     CloseBtn.Parent = Main
 
-    local CloseCorner = Instance.new("UICorner")
-    CloseCorner.CornerRadius = UDim.new(0, 6)
-    CloseCorner.Parent = CloseBtn
+    local cCorner = Instance.new("UICorner")
+    cCorner.CornerRadius = UDim.new(0, 6)
+    cCorner.Parent = CloseBtn
 
     CloseBtn.MouseButton1Click:Connect(function()
-        ScreenGui:Destroy()
+        pcall(function() ScreenGui:Destroy() end)
         PlayerSelectorGui = nil
-    end)
-
-    -- Refresh button
-    local RefreshBtn = Instance.new("TextButton")
-    RefreshBtn.Name = "RefreshBtn"
-    RefreshBtn.Size = UDim2.new(0, 70, 0, 28)
-    RefreshBtn.Position = UDim2.new(0, 15, 1, -38)
-    RefreshBtn.BackgroundColor3 = Color3.fromRGB(30, 30, 50)
-    RefreshBtn.Text = "Refresh"
-    RefreshBtn.TextColor3 = Color3.fromRGB(180, 180, 200)
-    RefreshBtn.TextSize = 11
-    RefreshBtn.Font = Enum.Font.Gotham
-    RefreshBtn.BorderSizePixel = 0
-    RefreshBtn.Parent = Main
-
-    local RefreshCorner = Instance.new("UICorner")
-    RefreshCorner.CornerRadius = UDim.new(0, 6)
-    RefreshCorner.Parent = RefreshBtn
-
-    RefreshBtn.MouseButton1Click:Connect(function()
-        CreatePlayerSelector()
     end)
 
     ScreenGui.Parent = LocalPlayer.PlayerGui
     PlayerSelectorGui = ScreenGui
+    Log("Da mo cua so chon player")
 end
 
--- ===================== MAIN UI MENU =====================
-
-local function CreateUI()
+-- ===================== MAIN MENU =====================
+local function CreateMainUI()
     if MenuGui then
-        MenuGui:Destroy()
+        pcall(function() MenuGui:Destroy() end)
     end
 
     local ScreenGui = Instance.new("ScreenGui")
-    ScreenGui.Name = "SailorPieceAutoTrade"
+    ScreenGui.Name = "AutoTradeMenu"
     ScreenGui.ResetOnSpawn = false
-    ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 
     local Main = Instance.new("Frame")
-    Main.Name = "Main"
-    Main.Size = UDim2.new(0, 340, 0, 480)
-    Main.Position = UDim2.new(0, 20, 0.5, -240)
-    Main.BackgroundColor3 = Color3.fromRGB(15, 15, 25)
+    Main.Size = UDim2.new(0, 320, 0, 460)
+    Main.Position = UDim2.new(0, 20, 0.5, -230)
+    Main.BackgroundColor3 = Color3.fromRGB(18, 18, 28)
     Main.BorderSizePixel = 0
     Main.Draggable = true
-    Main.Active = true
     Main.Parent = ScreenGui
 
-    local UICorner = Instance.new("UICorner")
-    UICorner.CornerRadius = UDim.new(0, 12)
-    UICorner.Parent = Main
+    local MainCorner = Instance.new("UICorner")
+    MainCorner.CornerRadius = UDim.new(0, 12)
+    MainCorner.Parent = Main
 
-    local UIGradient = Instance.new("UIGradient")
-    UIGradient.Color = ColorSequence.new(Color3.fromRGB(25, 25, 40), Color3.fromRGB(15, 15, 25))
-    UIGradient.Parent = Main
+    local grad = Instance.new("UIGradient")
+    grad.Color = ColorSequence.new(Color3.fromRGB(25, 25, 40), Color3.fromRGB(18, 18, 28))
+    grad.Parent = Main
 
-    -- Title
-    local Title = Instance.new("TextLabel")
-    Title.Name = "Title"
-    Title.Size = UDim2.new(1, 0, 0, 38)
-    Title.Position = UDim2.new(0, 0, 0, 8)
-    Title.BackgroundTransparency = 1
-    Title.Text = "SAILOR PIECE - AUTO TRADE"
-    Title.TextColor3 = Color3.fromRGB(85, 170, 255)
-    Title.TextSize = 16
-    Title.Font = Enum.Font.GothamBold
-    Title.Parent = Main
+    -- Header
+    local Header = Instance.new("TextLabel")
+    Header.Size = UDim2.new(1, 0, 0, 38)
+    Header.Position = UDim2.new(0, 0, 0, 8)
+    Header.BackgroundTransparency = 1
+    Header.Text = "SAILOR PIECE - AUTO TRADE"
+    Header.TextColor3 = Color3.fromRGB(85, 170, 255)
+    Header.TextSize = 15
+    Header.Font = Enum.Font.GothamBold
+    Header.Parent = Main
 
-    local SubTitle = Instance.new("TextLabel")
-    SubTitle.Size = UDim2.new(1, 0, 0, 18)
-    SubTitle.Position = UDim2.new(0, 0, 0, 30)
-    SubTitle.BackgroundTransparency = 1
-    SubTitle.Text = "Inventory Tracking + Discord Webhook"
-    SubTitle.TextColor3 = Color3.fromRGB(130, 130, 150)
-    SubTitle.TextSize = 10
-    SubTitle.Font = Enum.Font.Gotham
-    SubTitle.Parent = Main
+    local Sub = Instance.new("TextLabel")
+    Sub.Size = UDim2.new(1, 0, 0, 18)
+    Sub.Position = UDim2.new(0, 0, 0, 32)
+    Sub.BackgroundTransparency = 1
+    Sub.Text = "v2 - Chon Player -> Trade -> Add Items"
+    Sub.TextColor3 = Color3.fromRGB(120, 120, 140)
+    Sub.TextSize = 9
+    Sub.Font = Enum.Font.Gotham
+    Sub.Parent = Main
 
     -- Divider
-    local Divider = Instance.new("Frame")
-    Divider.Size = UDim2.new(1, -30, 0, 1)
-    Divider.Position = UDim2.new(0, 15, 0, 55)
-    Divider.BackgroundColor3 = Color3.fromRGB(50, 50, 70)
-    Divider.BorderSizePixel = 0
-    Divider.Parent = Main
+    local div = function(y)
+        local d = Instance.new("Frame")
+        d.Size = UDim2.new(1, -30, 0, 1)
+        d.Position = UDim2.new(0, 15, 0, y)
+        d.BackgroundColor3 = Color3.fromRGB(50, 50, 70)
+        d.BorderSizePixel = 0
+        d.Parent = Main
+        return d
+    end
 
-    local curY = 65
+    local y = 56
 
-    -- === TARGET PLAYER SECTION ===
-    local TargetLabel = Instance.new("TextLabel")
-    TargetLabel.Name = "TargetLabel"
-    TargetLabel.Size = UDim2.new(1, -30, 0, 18)
-    TargetLabel.Position = UDim2.new(0, 15, 0, curY)
-    TargetLabel.BackgroundTransparency = 1
-    TargetLabel.Text = "TARGET PLAYER"
-    TargetLabel.TextColor3 = Color3.fromRGB(100, 100, 130)
-    TargetLabel.TextSize = 9
-    TargetLabel.Font = Enum.Font.GothamBold
-    TargetLabel.TextXAlignment = Enum.TextXAlignment.Left
-    TargetLabel.Parent = Main
-    curY = curY + 22
+    -- --- SECTION 1: TARGET PLAYER ---
+    local sec1Lbl = Instance.new("TextLabel")
+    sec1Lbl.Size = UDim2.new(1, -30, 0, 16)
+    sec1Lbl.Position = UDim2.new(0, 15, 0, y)
+    sec1Lbl.BackgroundTransparency = 1
+    sec1Lbl.Text = "TARGET PLAYER"
+    sec1Lbl.TextColor3 = Color3.fromRGB(90, 90, 120)
+    sec1Lbl.TextSize = 9
+    sec1Lbl.Font = Enum.Font.GothamBold
+    sec1Lbl.TextXAlignment = Enum.TextXAlignment.Left
+    sec1Lbl.Parent = Main
+    y = y + 20
 
-    local TargetFrame = Instance.new("Frame")
-    TargetFrame.Name = "TargetFrame"
-    TargetFrame.Size = UDim2.new(1, -30, 0, 38)
-    TargetFrame.Position = UDim2.new(0, 15, 0, curY)
-    TargetFrame.BackgroundColor3 = Color3.fromRGB(25, 25, 40)
-    TargetFrame.BorderSizePixel = 0
-    TargetFrame.Parent = Main
+    local targetFrame = Instance.new("Frame")
+    targetFrame.Name = "TargetFrame"
+    targetFrame.Size = UDim2.new(1, -30, 0, 36)
+    targetFrame.Position = UDim2.new(0, 15, 0, y)
+    targetFrame.BackgroundColor3 = Color3.fromRGB(28, 28, 45)
+    targetFrame.BorderSizePixel = 0
+    targetFrame.Parent = Main
 
-    local TargetCorner = Instance.new("UICorner")
-    TargetCorner.CornerRadius = UDim.new(0, 8)
-    TargetCorner.Parent = TargetFrame
+    local tfCorner = Instance.new("UICorner")
+    tfCorner.CornerRadius = UDim.new(0, 8)
+    tfCorner.Parent = targetFrame
 
-    local TargetName = Instance.new("TextLabel")
-    TargetName.Name = "TargetName"
-    TargetName.Size = UDim2.new(1, -60, 1, 0)
-    TargetName.Position = UDim2.new(0, 12, 0, 0)
-    TargetName.BackgroundTransparency = 1
-    TargetName.Text = "Chua chon player"
-    TargetName.TextColor3 = Color3.fromRGB(180, 180, 180)
-    TargetName.TextSize = 12
-    TargetName.Font = Enum.Font.GothamBold
-    TargetName.TextXAlignment = Enum.TextXAlignment.Left
-    TargetName.Parent = TargetFrame
+    local targetName = Instance.new("TextLabel")
+    targetName.Name = "TargetName"
+    targetName.Size = UDim2.new(1, -80, 1, 0)
+    targetName.Position = UDim2.new(0, 10, 0, 0)
+    targetName.BackgroundTransparency = 1
+    targetName.Text = "Chua chon player"
+    targetName.TextColor3 = Color3.fromRGB(160, 160, 160)
+    targetName.TextSize = 12
+    targetName.Font = Enum.Font.GothamBold
+    targetName.TextXAlignment = Enum.TextXAlignment.Left
+    targetName.Parent = targetFrame
 
-    local SelectBtn = Instance.new("TextButton")
-    SelectBtn.Name = "SelectBtn"
-    SelectBtn.Size = UDim2.new(0, 45, 0, 26)
-    SelectBtn.Position = UDim2.new(1, -52, 0.5, -13)
-    SelectBtn.BackgroundColor3 = Color3.fromRGB(60, 60, 100)
-    SelectBtn.Text = "Select"
-    SelectBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
-    SelectBtn.TextSize = 10
-    SelectBtn.Font = Enum.Font.GothamBold
-    SelectBtn.BorderSizePixel = 0
-    SelectBtn.Parent = TargetFrame
+    local selectBtn = Instance.new("TextButton")
+    selectBtn.Name = "SelectBtn"
+    selectBtn.Size = UDim2.new(0, 60, 0, 24)
+    selectBtn.Position = UDim2.new(1, -68, 0.5, -12)
+    selectBtn.BackgroundColor3 = Color3.fromRGB(60, 60, 100)
+    selectBtn.Text = "Chon"
+    selectBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    selectBtn.TextSize = 10
+    selectBtn.Font = Enum.Font.GothamBold
+    selectBtn.BorderSizePixel = 0
+    selectBtn.Parent = targetFrame
 
-    local SelectCorner = Instance.new("UICorner")
-    SelectCorner.CornerRadius = UDim.new(0, 6)
-    SelectCorner.Parent = SelectBtn
+    local sbCorner = Instance.new("UICorner")
+    sbCorner.CornerRadius = UDim.new(0, 6)
+    sbCorner.Parent = selectBtn
 
-    SelectBtn.MouseButton1Click:Connect(function()
+    selectBtn.MouseButton1Click:Connect(function()
         CreatePlayerSelector()
     end)
+    y = y + 44
 
-    curY = curY + 46
+    div(y); y = y + 8
 
-    -- Divider 2
-    local Divider2 = Instance.new("Frame")
-    Divider2.Size = UDim2.new(1, -30, 0, 1)
-    Divider2.Position = UDim2.new(0, 15, 0, curY)
-    Divider2.BackgroundColor3 = Color3.fromRGB(50, 50, 70)
-    Divider2.BorderSizePixel = 0
-    Divider2.Parent = Main
-    curY = curY + 8
+    -- --- SECTION 2: INVENTORY ---
+    local sec2Lbl = Instance.new("TextLabel")
+    sec2Lbl.Size = UDim2.new(1, -30, 0, 16)
+    sec2Lbl.Position = UDim2.new(0, 15, 0, y)
+    sec2Lbl.BackgroundTransparency = 1
+    sec2Lbl.Text = "INVENTORY"
+    sec2Lbl.TextColor3 = Color3.fromRGB(90, 90, 120)
+    sec2Lbl.TextSize = 9
+    sec2Lbl.Font = Enum.Font.GothamBold
+    sec2Lbl.TextXAlignment = Enum.TextXAlignment.Left
+    sec2Lbl.Parent = Main
+    y = y + 20
 
-    -- === INVENTORY SECTION ===
-    local InvLabel = Instance.new("TextLabel")
-    InvLabel.Size = UDim2.new(1, -30, 0, 18)
-    InvLabel.Position = UDim2.new(0, 15, 0, curY)
-    InvLabel.BackgroundTransparency = 1
-    InvLabel.Text = "INVENTORY"
-    InvLabel.TextColor3 = Color3.fromRGB(100, 100, 130)
-    InvLabel.TextSize = 9
-    InvLabel.Font = Enum.Font.GothamBold
-    InvLabel.TextXAlignment = Enum.TextXAlignment.Left
-    InvLabel.Parent = Main
-    curY = curY + 22
+    local invFrame = Instance.new("Frame")
+    invFrame.Name = "InvFrame"
+    invFrame.Size = UDim2.new(1, -30, 0, 90)
+    invFrame.Position = UDim2.new(0, 15, 0, y)
+    invFrame.BackgroundColor3 = Color3.fromRGB(28, 28, 45)
+    invFrame.BorderSizePixel = 0
+    invFrame.Parent = Main
 
-    local InvFrame = Instance.new("Frame")
-    InvFrame.Name = "InvFrame"
-    InvFrame.Size = UDim2.new(1, -30, 0, 80)
-    InvFrame.Position = UDim2.new(0, 15, 0, curY)
-    InvFrame.BackgroundColor3 = Color3.fromRGB(25, 25, 40)
-    InvFrame.BorderSizePixel = 0
-    InvFrame.Parent = Main
+    local invCorner = Instance.new("UICorner")
+    invCorner.CornerRadius = UDim.new(0, 8)
+    invCorner.Parent = invFrame
 
-    local InvCorner = Instance.new("UICorner")
-    InvCorner.CornerRadius = UDim.new(0, 8)
-    InvCorner.Parent = InvFrame
+    local invCountLbl = Instance.new("TextLabel")
+    invCountLbl.Name = "InvCount"
+    invCountLbl.Size = UDim2.new(1, -15, 0, 18)
+    invCountLbl.Position = UDim2.new(0, 8, 0, 5)
+    invCountLbl.BackgroundTransparency = 1
+    invCountLbl.Text = "Tong items: 0"
+    invCountLbl.TextColor3 = Color3.fromRGB(85, 170, 255)
+    invCountLbl.TextSize = 11
+    invCountLbl.Font = Enum.Font.GothamBold
+    invCountLbl.TextXAlignment = Enum.TextXAlignment.Left
+    invCountLbl.Parent = invFrame
 
-    local InvCountLabel = Instance.new("TextLabel")
-    InvCountLabel.Name = "InvCountLabel"
-    InvCountLabel.Size = UDim2.new(1, -20, 0, 20)
-    InvCountLabel.Position = UDim2.new(0, 10, 0, 6)
-    InvCountLabel.BackgroundTransparency = 1
-    InvCountLabel.Text = "Tong items: 0"
-    InvCountLabel.TextColor3 = Color3.fromRGB(85, 170, 255)
-    InvCountLabel.TextSize = 11
-    InvCountLabel.Font = Enum.Font.GothamBold
-    InvCountLabel.TextXAlignment = Enum.TextXAlignment.Left
-    InvCountLabel.Parent = InvFrame
+    local invListLbl = Instance.new("TextLabel")
+    invListLbl.Name = "InvList"
+    invListLbl.Size = UDim2.new(1, -15, 0, 62)
+    invListLbl.Position = UDim2.new(0, 8, 0, 23)
+    invListLbl.BackgroundTransparency = 1
+    invListLbl.Text = "(Nhan 'Quet' de lay danh sach item)"
+    invListLbl.TextColor3 = Color3.fromRGB(130, 130, 150)
+    invListLbl.TextSize = 9
+    invListLbl.Font = Enum.Font.Gotham
+    invListLbl.TextXAlignment = Enum.TextXAlignment.Left
+    invListLbl.TextYAlignment = Enum.TextYAlignment.Top
+    invListLbl.Parent = invFrame
+    y = y + 98
 
-    local InvListLabel = Instance.new("TextLabel")
-    InvListLabel.Name = "InvListLabel"
-    InvListLabel.Size = UDim2.new(1, -20, 0, 50)
-    InvListLabel.Position = UDim2.new(0, 10, 0, 26)
-    InvListLabel.BackgroundTransparency = 1
-    InvListLabel.Text = "(Danh sach item se hien o day)"
-    InvListLabel.TextColor3 = Color3.fromRGB(130, 130, 150)
-    InvListLabel.TextSize = 9
-    InvListLabel.Font = Enum.Font.Gotham
-    InvListLabel.TextXAlignment = Enum.TextXAlignment.Left
-    InvListLabel.TextYAlignment = Enum.TextYAlignment.Top
-    InvListLabel.Parent = InvFrame
+    div(y); y = y + 8
 
-    curY = curY + 88
+    -- --- SECTION 3: ACTIONS ---
+    local sec3Lbl = Instance.new("TextLabel")
+    sec3Lbl.Size = UDim2.new(1, -30, 0, 16)
+    sec3Lbl.Position = UDim2.new(0, 15, 0, y)
+    sec3Lbl.BackgroundTransparency = 1
+    sec3Lbl.Text = "ACTIONS"
+    sec3Lbl.TextColor3 = Color3.fromRGB(90, 90, 120)
+    sec3Lbl.TextSize = 9
+    sec3Lbl.Font = Enum.Font.GothamBold
+    sec3Lbl.TextXAlignment = Enum.TextXAlignment.Left
+    sec3Lbl.Parent = Main
+    y = y + 20
 
-    -- Divider 3
-    local Divider3 = Instance.new("Frame")
-    Divider3.Size = UDim2.new(1, -30, 0, 1)
-    Divider3.Position = UDim2.new(0, 15, 0, curY)
-    Divider3.BackgroundColor3 = Color3.fromRGB(50, 50, 70)
-    Divider3.BorderSizePixel = 0
-    Divider3.Parent = Main
-    curY = curY + 8
+    local function makeBtn(name, text, color, textColor, yPos)
+        local btn = Instance.new("TextButton")
+        btn.Name = name
+        btn.Size = UDim2.new(1, -30, 0, 36)
+        btn.Position = UDim2.new(0, 15, 0, yPos)
+        btn.BackgroundColor3 = color
+        btn.Text = text
+        btn.TextColor3 = textColor
+        btn.TextSize = 12
+        btn.Font = Enum.Font.GothamBold
+        btn.BorderSizePixel = 0
+        btn.Parent = Main
 
-    -- === TRADE ACTIONS SECTION ===
-    local TradeLabel = Instance.new("TextLabel")
-    TradeLabel.Size = UDim2.new(1, -30, 0, 18)
-    TradeLabel.Position = UDim2.new(0, 15, 0, curY)
-    TradeLabel.BackgroundTransparency = 1
-    TradeLabel.Text = "TRADE ACTIONS"
-    TradeLabel.TextColor3 = Color3.fromRGB(100, 100, 130)
-    TradeLabel.TextSize = 9
-    TradeLabel.Font = Enum.Font.GothamBold
-    TradeLabel.TextXAlignment = Enum.TextXAlignment.Left
-    TradeLabel.Parent = Main
-    curY = curY + 22
+        local bCorner = Instance.new("UICorner")
+        bCorner.CornerRadius = UDim.new(0, 8)
+        bCorner.Parent = btn
 
-    -- Send Trade Request Button
-    local SendTradeBtn = Instance.new("TextButton")
-    SendTradeBtn.Name = "SendTradeBtn"
-    SendTradeBtn.Size = UDim2.new(1, -30, 0, 36)
-    SendTradeBtn.Position = UDim2.new(0, 15, 0, curY)
-    SendTradeBtn.BackgroundColor3 = Color3.fromRGB(40, 40, 70)
-    SendTradeBtn.Text = "SEND TRADE REQUEST"
-    SendTradeBtn.TextColor3 = Color3.fromRGB(85, 170, 255)
-    SendTradeBtn.TextSize = 12
-    SendTradeBtn.Font = Enum.Font.GothamBold
-    SendTradeBtn.BorderSizePixel = 0
-    SendTradeBtn.Parent = Main
+        return btn
+    end
 
-    local SendTradeCorner = Instance.new("UICorner")
-    SendTradeCorner.CornerRadius = UDim.new(0, 8)
-    SendTradeCorner.Parent = SendTradeBtn
+    local btnQuet = makeBtn("BtnQuet", "1. QUET INVENTORY", Color3.fromRGB(30, 60, 90), Color3.fromRGB(100, 180, 255), y)
+    local btnTrade = makeBtn("BtnTrade", "2. GUI TRADE REQUEST", Color3.fromRGB(30, 60, 90), Color3.fromRGB(100, 180, 255), y + 44)
+    local btnAdd = makeBtn("BtnAdd", "3. ADD ITEMS VAO TRADE", Color3.fromRGB(30, 80, 50), Color3.fromRGB(85, 255, 85), y + 88)
+    local btnDiscord = makeBtn("BtnDiscord", "4. GUI DISCORD", Color3.fromRGB(50, 40, 90), Color3.fromRGB(160, 140, 220), y + 132)
 
-    SendTradeBtn.MouseButton1Click:Connect(function()
-        if not TradeSession.targetPlayer then
-            Log("Vui long chon player truoc!", Color3.fromRGB(255, 200, 0))
+    btnQuet.MouseButton1Click:Connect(function()
+        ScanInventory()
+    end)
+
+    btnTrade.MouseButton1Click:Connect(function()
+        if TargetPlayerName == "" then
+            LogError("Chua chon player!")
             CreatePlayerSelector()
             return
         end
-        SendTradeRequest(TradeSession.targetPlayer)
+        SendTradeRequest(TargetPlayerName)
     end)
-    curY = curY + 44
 
-    -- ADD ITEMS Button (START/STOP toggle)
-    local AddItemsBtn = Instance.new("TextButton")
-    AddItemsBtn.Name = "AddItemsBtn"
-    AddItemsBtn.Size = UDim2.new(1, -30, 0, 36)
-    AddItemsBtn.Position = UDim2.new(0, 15, 0, curY)
-    AddItemsBtn.BackgroundColor3 = Color3.fromRGB(30, 80, 50)
-    AddItemsBtn.Text = "[ START ] ADD ALL ITEMS TO TRADE"
-    AddItemsBtn.TextColor3 = Color3.fromRGB(85, 255, 85)
-    AddItemsBtn.TextSize = 12
-    AddItemsBtn.Font = Enum.Font.GothamBold
-    AddItemsBtn.BorderSizePixel = 0
-    AddItemsBtn.Parent = Main
-
-    local AddItemsCorner = Instance.new("UICorner")
-    AddItemsCorner.CornerRadius = UDim.new(0, 8)
-    AddItemsCorner.Parent = AddItemsBtn
-
-    AddItemsBtn.MouseButton1Click:Connect(function()
-        if not TradeSession.active then
-            Log("Chua co trade nao active - vui long gui trade request truoc", Color3.fromRGB(255, 200, 0))
+    btnAdd.MouseButton1Click:Connect(function()
+        if #InventoryList == 0 then
+            LogError("Chua quet inventory!")
             return
         end
+        ItemsToTrade = InventoryList
+        AddItemsToTrade()
+    end)
 
-        if TradeSession.addingItems then
-            -- STOP
-            TradeSession.addingItems = false
-            AddItemsBtn.BackgroundColor3 = Color3.fromRGB(30, 80, 50)
-            AddItemsBtn.Text = "[ START ] ADD ALL ITEMS TO TRADE"
-            AddItemsBtn.TextColor3 = Color3.fromRGB(85, 255, 85)
-            Log("Da dung add items", Color3.fromRGB(255, 80, 80))
-        else
-            -- START
-            AddAllInventoryItemsToTrade()
-            AddItemsBtn.BackgroundColor3 = Color3.fromRGB(120, 40, 40)
-            AddItemsBtn.Text = "[ STOP ] ADDING ITEMS..."
-            AddItemsBtn.TextColor3 = Color3.fromRGB(255, 100, 100)
+    btnDiscord.MouseButton1Click:Connect(function()
+        if #InventoryList == 0 then
+            LogError("Chua quet inventory!")
+            return
         end
+        -- Gui danh sach item ra Discord
+        local lines = {}
+        local totalVal = 0
+        for i, item in ipairs(InventoryList) do
+            local emoji = ""
+            if item.rarity == "Legendary" then emoji = " [LEGEND]"
+            elseif item.rarity == "Epic" then emoji = " [EPIC]"
+            elseif item.rarity == "Rare" then emoji = " [RARE]"
+            end
+            table.insert(lines, string.format("**%d.** %s%s  |  `%s`", i, item.name, emoji, FormatVal(item.value)))
+            totalVal = totalVal + item.value
+        end
+        local itemsStr = table.concat(lines, "\n")
+        if #itemsStr > 4000 then itemsStr = itemsStr:sub(1, 4000) .. "\n_(va nhieu hon)_" end
+
+        local embed = {
+            {
+                title = "TRADE: " .. TargetPlayerName,
+                description = string.format("**Nguoi nhan:** %s\n**Tong items:** %d\n**Tong gia tri:** %s\n**Time:** %s",
+                    TargetPlayerName ~= "" and TargetPlayerName or "Chua chon",
+                    #InventoryList,
+                    FormatVal(totalVal),
+                    os.date("%d/%m/%Y %H:%M:%S")
+                ),
+                color = 0x55AAFF,
+                fields = {
+                    {
+                        name = "Danh sach Item",
+                        value = itemsStr,
+                        inline = false
+                    },
+                    {
+                        name = "Huong dan",
+                        value = "1. Nhan nut **GUI TRADE**\n2. Nhan **ADD ITEMS**\n3. Tu bam **ACCEPT** trade",
+                        inline = false
+                    }
+                },
+                footer = {text = "Sailor Piece AutoTrade v2"},
+                timestamp = DateTime.now():ToIsoString()
+            }
+        }
+        SendToDiscord(embed)
     end)
-    curY = curY + 44
+    y = y + 180
 
-    -- Discord Send Button
-    local DiscordBtn = Instance.new("TextButton")
-    DiscordBtn.Name = "DiscordBtn"
-    DiscordBtn.Size = UDim2.new(1, -30, 0, 36)
-    DiscordBtn.Position = UDim2.new(0, 15, 0, curY)
-    DiscordBtn.BackgroundColor3 = Color3.fromRGB(55, 55, 90)
-    DiscordBtn.Text = "SEND ITEMS LIST TO DISCORD"
-    DiscordBtn.TextColor3 = Color3.fromRGB(140, 140, 200)
-    DiscordBtn.TextSize = 12
-    DiscordBtn.Font = Enum.Font.GothamBold
-    DiscordBtn.BorderSizePixel = 0
-    DiscordBtn.Parent = Main
+    div(y); y = y + 8
 
-    local DiscordCorner = Instance.new("UICorner")
-    DiscordCorner.CornerRadius = UDim.new(0, 8)
-    DiscordCorner.Parent = DiscordBtn
+    -- --- SECTION 4: STATS ---
+    local sec4Lbl = Instance.new("TextLabel")
+    sec4Lbl.Size = UDim2.new(1, -30, 0, 16)
+    sec4Lbl.Position = UDim2.new(0, 15, 0, y)
+    sec4Lbl.BackgroundTransparency = 1
+    sec4Lbl.Text = "SESSION STATS"
+    sec4Lbl.TextColor3 = Color3.fromRGB(90, 90, 120)
+    sec4Lbl.TextSize = 9
+    sec4Lbl.Font = Enum.Font.GothamBold
+    sec4Lbl.TextXAlignment = Enum.TextXAlignment.Left
+    sec4Lbl.Parent = Main
+    y = y + 20
 
-    DiscordBtn.MouseButton1Click:Connect(function()
-        task.spawn(SendTradeItemsToDiscord)
-    end)
-    curY = curY + 44
+    local statRow = function(name, valName, yPos)
+        local row = Instance.new("Frame")
+        row.Size = UDim2.new(1, -30, 0, 18)
+        row.Position = UDim2.new(0, 15, 0, yPos)
+        row.BackgroundTransparency = 1
+        row.Parent = Main
 
-    -- Divider 4
-    local Divider4 = Instance.new("Frame")
-    Divider4.Size = UDim2.new(1, -30, 0, 1)
-    Divider4.Position = UDim2.new(0, 15, 0, curY)
-    Divider4.BackgroundColor3 = Color3.fromRGB(50, 50, 70)
-    Divider4.BorderSizePixel = 0
-    Divider4.Parent = Main
-    curY = curY + 8
+        local lbl = Instance.new("TextLabel")
+        lbl.Size = UDim2.new(0.6, 0, 1, 0)
+        lbl.BackgroundTransparency = 1
+        lbl.Text = name
+        lbl.TextColor3 = Color3.fromRGB(140, 140, 160)
+        lbl.TextSize = 10
+        lbl.Font = Enum.Font.Gotham
+        lbl.TextXAlignment = Enum.TextXAlignment.Left
+        lbl.Parent = row
 
-    -- === SESSION STATS ===
-    local StatsLabel = Instance.new("TextLabel")
-    StatsLabel.Size = UDim2.new(1, -30, 0, 18)
-    StatsLabel.Position = UDim2.new(0, 15, 0, curY)
-    StatsLabel.BackgroundTransparency = 1
-    StatsLabel.Text = "SESSION STATS"
-    StatsLabel.TextColor3 = Color3.fromRGB(100, 100, 130)
-    StatsLabel.TextSize = 9
-    StatsLabel.Font = Enum.Font.GothamBold
-    StatsLabel.TextXAlignment = Enum.TextXAlignment.Left
-    StatsLabel.Parent = Main
-    curY = curY + 22
+        local val = Instance.new("TextLabel")
+        val.Name = valName
+        val.Size = UDim2.new(0.4, 0, 1, 0)
+        val.Position = UDim2.new(0.6, 0, 0, 0)
+        val.BackgroundTransparency = 1
+        val.Text = "0"
+        val.TextColor3 = Color3.fromRGB(85, 170, 255)
+        val.TextSize = 10
+        val.Font = Enum.Font.GothamBold
+        val.TextXAlignment = Enum.TextXAlignment.Right
+        val.Parent = row
 
-    local function CreateStatRow(name, valName, y)
-        local Row = Instance.new("Frame")
-        Row.Size = UDim2.new(1, -30, 0, 18)
-        Row.Position = UDim2.new(0, 15, 0, y)
-        Row.BackgroundTransparency = 1
-        Row.Parent = Main
-
-        local Lbl = Instance.new("TextLabel")
-        Lbl.Size = UDim2.new(0.6, 0, 1, 0)
-        Lbl.BackgroundTransparency = 1
-        Lbl.Text = name
-        Lbl.TextColor3 = Color3.fromRGB(150, 150, 170)
-        Lbl.TextSize = 10
-        Lbl.Font = Enum.Font.Gotham
-        Lbl.TextXAlignment = Enum.TextXAlignment.Left
-        Lbl.Parent = Row
-
-        local Val = Instance.new("TextLabel")
-        Val.Name = valName
-        Val.Size = UDim2.new(0.4, 0, 1, 0)
-        Val.Position = UDim2.new(0.6, 0, 0, 0)
-        Val.BackgroundTransparency = 1
-        Val.Text = "0"
-        Val.TextColor3 = Color3.fromRGB(85, 170, 255)
-        Val.TextSize = 10
-        Val.Font = Enum.Font.GothamBold
-        Val.TextXAlignment = Enum.TextXAlignment.Right
-        Val.Parent = Row
-
-        return Val
+        return val
     end
 
-    local statTradesSent = CreateStatRow("Trades Sent", "TradesSentVal", curY); curY = curY + 20
-    local statItemsAdded = CreateStatRow("Items Added", "ItemsAddedVal", curY); curY = curY + 20
-    local statItemsInTrade = CreateStatRow("Items in Trade", "ItemsInTradeVal", curY); curY = curY + 20
-    local statInventory = CreateStatRow("Inventory", "InventoryVal", curY); curY = curY + 20
-
-    curY = curY + 4
+    statRow("Trades da gui", "StatTrades", y); y = y + 20
+    statRow("Items da add", "StatItems", y); y = y + 20
+    statRow("Items trong Inv", "StatInv", y); y = y + 4
 
     -- Footer
-    local Footer = Instance.new("TextLabel")
-    Footer.Size = UDim2.new(1, 0, 0, 18)
-    Footer.Position = UDim2.new(0, 0, 1, -26)
-    Footer.BackgroundTransparency = 1
-    Footer.Text = "F11: Menu  |  DEL: Hide  |  Sailor Piece AutoTrade"
-    Footer.TextColor3 = Color3.fromRGB(70, 70, 90)
-    Footer.TextSize = 8
-    Footer.Font = Enum.Font.Gotham
-    Footer.Parent = Main
+    local footer = Instance.new("TextLabel")
+    footer.Size = UDim2.new(1, 0, 0, 16)
+    footer.Position = UDim2.new(0, 0, 1, -24)
+    footer.BackgroundTransparency = 1
+    footer.Text = "F11: Menu  |  F10: Chon player  |  DEL: An"
+    footer.TextColor3 = Color3.fromRGB(60, 60, 80)
+    footer.TextSize = 8
+    footer.Font = Enum.Font.Gotham
+    footer.Parent = Main
 
     -- Close button
-    local CloseBtn = Instance.new("TextButton")
-    CloseBtn.Name = "CloseBtn"
-    CloseBtn.Size = UDim2.new(0, 24, 0, 24)
-    CloseBtn.Position = UDim2.new(1, -36, 0, 10)
-    CloseBtn.BackgroundColor3 = Color3.fromRGB(80, 40, 40)
-    CloseBtn.Text = "X"
-    CloseBtn.TextColor3 = Color3.fromRGB(255, 100, 100)
-    CloseBtn.TextSize = 12
-    CloseBtn.Font = Enum.Font.GothamBold
-    CloseBtn.BorderSizePixel = 0
-    CloseBtn.Parent = Main
+    local closeBtn = Instance.new("TextButton")
+    closeBtn.Size = UDim2.new(0, 24, 0, 24)
+    closeBtn.Position = UDim2.new(1, -36, 0, 10)
+    closeBtn.BackgroundColor3 = Color3.fromRGB(80, 40, 40)
+    closeBtn.Text = "X"
+    closeBtn.TextColor3 = Color3.fromRGB(255, 100, 100)
+    closeBtn.TextSize = 12
+    closeBtn.Font = Enum.Font.GothamBold
+    closeBtn.BorderSizePixel = 0
+    closeBtn.Parent = Main
 
-    local CloseCorner = Instance.new("UICorner")
-    CloseCorner.CornerRadius = UDim.new(0, 6)
-    CloseCorner.Parent = CloseBtn
+    local clCorner = Instance.new("UICorner")
+    clCorner.CornerRadius = UDim.new(0, 6)
+    clCorner.Parent = closeBtn
 
-    CloseBtn.MouseButton1Click:Connect(function()
-        ScreenGui:Destroy()
+    closeBtn.MouseButton1Click:Connect(function()
+        pcall(function() ScreenGui:Destroy() end)
         MenuGui = nil
     end)
 
     -- Update loop
     task.spawn(function()
-        while task.wait(2) do
+        while true do
+            task.wait(1.5)
             pcall(function()
-                if not MenuGui then break end
-                local mainFrame = MenuGui:FindFirstChild("Main")
-                if not mainFrame then break end
+                if not MenuGui or not MenuGui.Parent then break end
+                local mf = MenuGui:FindFirstChild("Main")
+                if not mf then break end
 
-                -- Update target player
-                local targetName = mainFrame:FindFirstChild("TargetFrame") and mainFrame.TargetFrame:FindFirstChild("TargetName")
-                if targetName then
-                    if TradeSession.targetUsername and TradeSession.targetUsername ~= "" then
-                        targetName.Text = TradeSession.targetUsername
-                        targetName.TextColor3 = Color3.fromRGB(85, 255, 85)
+                -- Update target name
+                local tn = mf.TargetFrame and mf.TargetFrame:FindFirstChild("TargetName")
+                if tn then
+                    if TargetPlayerName ~= "" then
+                        tn.Text = TargetPlayerName
+                        tn.TextColor3 = Color3.fromRGB(85, 255, 85)
                     else
-                        targetName.Text = "Chua chon player"
-                        targetName.TextColor3 = Color3.fromRGB(180, 180, 180)
+                        tn.Text = "Chua chon player"
+                        tn.TextColor3 = Color3.fromRGB(160, 160, 160)
                     end
                 end
 
-                -- Update Add Items button state
-                local addItemsBtn = mainFrame:FindFirstChild("AddItemsBtn")
-                if addItemsBtn then
-                    if TradeSession.addingItems then
-                        addItemsBtn.BackgroundColor3 = Color3.fromRGB(120, 40, 40)
-                        addItemsBtn.Text = "[ STOP ] ADDING ITEMS..."
-                        addItemsBtn.TextColor3 = Color3.fromRGB(255, 100, 100)
-                    else
-                        addItemsBtn.BackgroundColor3 = Color3.fromRGB(30, 80, 50)
-                        addItemsBtn.Text = "[ START ] ADD ALL ITEMS TO TRADE"
-                        addItemsBtn.TextColor3 = Color3.fromRGB(85, 255, 85)
-                    end
-                end
-
-                -- Update inventory list
-                local invFrame = mainFrame:FindFirstChild("InvFrame")
+                -- Update inventory
+                local invFrame = mf:FindFirstChild("InvFrame")
                 if invFrame then
-                    local invCountLabel = invFrame:FindFirstChild("InvCountLabel")
-                    local invListLabel = invFrame:FindFirstChild("InvListLabel")
-                    local inventory = GetPlayerInventory()
-
-                    if invCountLabel then
-                        invCountLabel.Text = "Tong items: " .. #inventory
-                    end
-
-                    if invListLabel then
-                        local lines = {}
-                        local maxShow = 4
-                        for i = 1, math.min(#inventory, maxShow) do
-                            local name = inventory[i]
-                            local val, rarity, tier = GetItemValue(name)
-                            table.insert(lines, string.format("%d. %s [%s]", i, name, rarity))
-                        end
-                        if #inventory > maxShow then
-                            table.insert(lines, string.format("... va %d items khac", #inventory - maxShow))
-                        end
-                        if #lines > 0 then
-                            invListLabel.Text = table.concat(lines, "\n")
+                    local cnt = invFrame:FindFirstChild("InvCount")
+                    local lst = invFrame:FindFirstChild("InvList")
+                    if cnt then cnt.Text = "Tong items: " .. #InventoryList end
+                    if lst then
+                        if #InventoryList > 0 then
+                            local lines = {}
+                            for i = 1, math.min(#InventoryList, 5) do
+                                local item = InventoryList[i]
+                                table.insert(lines, string.format("%d. %s [%s]", i, item.name, item.rarity))
+                            end
+                            if #InventoryList > 5 then
+                                table.insert(lines, string.format("... va %d items khac", #InventoryList - 5))
+                            end
+                            lst.Text = table.concat(lines, "\n")
                         else
-                            invListLabel.Text = "(Danh sach item se hien o day)"
+                            lst.Text = "(Nhan 'Quet' de lay danh sach)"
                         end
                     end
                 end
 
                 -- Update stats
-                local function updateStat(name, value)
-                    local stat = mainFrame:FindFirstChild(name)
-                    if stat then stat.Text = tostring(value) end
+                local function upStat(name, val)
+                    local s = mf:FindFirstChild(name)
+                    if s then s.Text = tostring(val) end
                 end
-                updateStat("TradesSentVal", SessionStats.trades_sent)
-                updateStat("ItemsAddedVal", SessionStats.items_added)
-                updateStat("ItemsInTradeVal", #TradeSession.itemsToTrade)
-                updateStat("InventoryVal", GetInventoryCount())
+                upStat("StatTrades", Stats.trades_sent)
+                upStat("StatItems", Stats.items_added)
+                upStat("StatInv", #InventoryList)
             end)
             if not MenuGui then break end
         end
@@ -1532,208 +852,53 @@ local function CreateUI()
     ScreenGui.Parent = LocalPlayer.PlayerGui
     MenuGui = ScreenGui
 
-    -- Keyboard shortcut
+    -- Keyboard
     UserInputService.InputBegan:Connect(function(input, processed)
         if input.KeyCode == Enum.KeyCode.Delete then
             if MenuGui then
-                MenuGui:Destroy()
+                pcall(function() MenuGui:Destroy() end)
                 MenuGui = nil
             end
         elseif input.KeyCode == Enum.KeyCode.F11 then
             if MenuGui then
-                MenuGui:Destroy()
+                pcall(function() MenuGui:Destroy() end)
                 MenuGui = nil
             else
-                CreateUI()
+                CreateMainUI()
             end
         elseif input.KeyCode == Enum.KeyCode.F10 then
             CreatePlayerSelector()
         end
     end)
+
+    Log("Menu da tao!")
 end
 
 -- ===================== COMMANDS =====================
-
-local function SetupCommands()
-    local Commands = {
-        ["!select"] = function() CreatePlayerSelector() end,
-        ["!send"] = function()
-            if TradeSession.targetPlayer then
-                SendTradeRequest(TradeSession.targetPlayer)
-            else
-                Log("Chua chon player - su dung !select hoac nut Select trong menu")
-            end
-        end,
-        ["!add"] = function() AddAllInventoryItemsToTrade() end,
-        ["!stop"] = function()
-            TradeSession.addingItems = false
-            Log("Da dung add items")
-        end,
-        ["!discord"] = function() task.spawn(SendTradeItemsToDiscord) end,
-        ["!inv"] = function()
-            local items = GetPlayerInventory()
-            Log("=== INVENTORY (" .. #items .. " items) ===")
-            for i, name in ipairs(items) do
-                local val, rarity, tier = GetItemValue(name)
-                Log(string.format("[%d] %s | %s | Tier %d | %s", i, name, rarity, tier, FormatValue(val)))
-            end
-        end,
-        ["!refreshinv"] = function()
-            local items = RefreshInventoryCache()
-            Log("Inventory refreshed: " .. GetInventoryCount() .. " items")
-        end,
-        ["!stats"] = function()
-            Log(string.format("Trades: %d | Items Added: %d | Items in Trade: %d | Inv: %d",
-                SessionStats.trades_sent, SessionStats.items_added, #TradeSession.itemsToTrade, GetInventoryCount()))
-        end,
-        ["!status"] = function()
-            Log("=== STATUS ===")
-            Log("Target: " .. (TradeSession.targetUsername or "None"))
-            Log("Trade Active: " .. tostring(TradeSession.active))
-            Log("Adding Items: " .. tostring(TradeSession.addingItems))
-            Log("Items in Trade: " .. #TradeSession.itemsToTrade)
-            Log("Items in Inv: " .. GetInventoryCount())
-        end,
-        ["!clear"] = function()
-            TradeSession.itemsToTrade = {}
-            TradeSession.active = false
-            TradeSession.targetPlayer = nil
-            TradeSession.targetUsername = ""
-            TradeSession.addingItems = false
-            Log("Da reset trade session")
-        end,
-        ["!ui"] = function() CreateUI() end,
-        ["!help"] = function()
-            Log("=== COMMANDS ===")
-            Log("!select - Mo cua so chon player")
-            Log("!send - Gui trade request toi player da chon")
-            Log("!add - Add all items vao trade")
-            Log("!stop - Dung add items")
-            Log("!discord - Gui items ra Discord")
-            Log("!inv - Xem inventory")
-            Log("!refreshinv - Quet lai inventory")
-            Log("!stats - Xem thong ke")
-            Log("!status - Xem trang thai hien tai")
-            Log("!clear - Reset trade session")
-            Log("!ui - Mo giao dien")
-        end,
-    }
-
-    UserInputService.InputBegan:Connect(function(input, processed)
-        if processed then return end
-    end)
-
-    Log("=== Sailor Piece AutoTrade Loaded ===")
-    Log("Go !help de xem danh sach lenh")
-    Log("Press F11 de mo giao dien, F10 de chon player, DEL de tat")
-    Log("Player: " .. CurrentPlayer)
-end
-
--- ===================== ANTI AFK =====================
-
-local function SetupAntiAfk()
-    if not CONFIG.ANTI_AFK then return end
-
-    LocalPlayer.Idled:Connect(function()
-        if CONFIG.ANTI_AFK and VirtualInputManager then
-            pcall(function()
-                VirtualInputManager:SendCoreKeyboardEvent(Enum.KeyCode.F9, true, false, game)
-                task.wait()
-                VirtualInputManager:SendCoreKeyboardEvent(Enum.KeyCode.F9, false, false, game)
-            end)
-        end
-    end)
-
-    RunService.Heartbeat:Connect(function()
-        -- Anti AFK via Heartbeat disabled - chi su dung Idled event
-    end)
-
-    Log("Anti AFK da bat")
-end
-
--- ===================== AUTO REJOIN =====================
-
-local function AutoRejoin()
-    if not CONFIG.AUTO_REJOIN then return end
-
-    Log("Mat ket noi - Bat dau auto rejoin...", Color3.fromRGB(255, 80, 80))
-
-    task.wait(3)
-
-    local jobId = game.JobId
-    local servers = {}
-
-    pcall(function()
-        local resp = HttpService:GetAsync("https://games.roblox.com/v1/games/" .. game.PlaceId .. "/servers/Public?sortFilter=2&limit=100")
-        local data = HttpService:JSONDecode(resp)
-        if data and data.data then
-            for _, server in ipairs(data.data) do
-                if server.id ~= jobId then
-                    table.insert(servers, server.id)
-                end
-            end
-        end
-    end)
-
-    task.wait(2)
-
-    if #servers > 0 then
-        local chosen = servers[math.random(1, #servers)]
-        Log("Rejoin server: " .. chosen)
-        TeleportService:TeleportToPlaceInstance(game.PlaceId, chosen, LocalPlayer)
-    else
-        Log("Khong tim thay server - Teleport ve lobby...")
-        TeleportService:TeleportToPlaceInstance(game.PlaceId, game.JobId, LocalPlayer)
-    end
-end
-
-game:GetService("NetworkClient").ChildRemoved:Connect(function(child)
-    if child:IsA("Player") and child.Name == LocalPlayer.Name then
-        AutoRejoin()
+UserInputService.InputBegan:Connect(function(input)
+    if input.KeyCode == Enum.KeyCode.F10 then
+        CreatePlayerSelector()
     end
 end)
 
--- ===================== INITIALIZATION =====================
+-- ===================== START =====================
+Log("=====================================")
+Log("Sailor Piece AutoTrade v2")
+Log("Dang khoi dong...")
+Log("=====================================")
 
-local function Initialize()
-    Log("Khoi dong Sailor Piece AutoTrade...")
+-- Test Discord webhook ngay
+SendTestMessage()
 
-    SetupAntiAfk()
-    SetupCommands()
-    MonitorTradeGui()
-    PollDiscordForInteractions()
-    CreateUI()
+-- Tao menu
+CreateMainUI()
 
-    -- Khoi tao inventory system
-    task.spawn(function()
-        Log("Dang quet inventory modules...", Color3.fromRGB(200, 200, 100))
-        local foundModules = BuildItemDatabaseFromModules()
-        if foundModules then
-            Log("Da tim thay item database tu game module", Color3.fromRGB(100, 255, 100))
-        else
-            Log("Khong tim thay item database - su dung che do tu dong nhan dien", Color3.fromRGB(255, 200, 100))
-        end
+-- Quet inventory tu dong
+task.wait(1)
+ScanInventory()
 
-        local items = RefreshInventoryCache()
-        Log("Inventory hien tai: " .. GetInventoryCount() .. " items", Color3.fromRGB(85, 170, 255))
-    end)
-
-    -- Quet inventory dinh ky
-    task.spawn(function()
-        while task.wait(CONFIG.SCAN_INVENTORY_INTERVAL) do
-            RefreshInventoryCache()
-        end
-    end)
-
-    if CONFIG.WEBHOOK_URL ~= "YOUR_DISCORD_WEBHOOK_HERE" and CONFIG.WEBHOOK_URL ~= "" then
-        task.spawn(SendStartupNotification)
-    else
-        Log("Chu y: Vui long thay WEBHOOK_URL de nhan thong bao Discord", Color3.fromRGB(255, 200, 0))
-    end
-
-    Log("Sailor Piece AutoTrade da san sang!")
-    Log("F10: Chon player  |  F11: Mo/Tat menu")
-    Log("Lenh: !help de xem danh sach")
-end
-
-Initialize()
+Log("=====================================")
+Log("Khoi dong xong!")
+Log("F11: Mo/tat menu")
+Log("F10: Chon player")
+Log("=====================================")
