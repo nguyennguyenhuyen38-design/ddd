@@ -21,7 +21,7 @@ local CONFIG = {
     AUTO_REJOIN = false,                       -- Bat auto rejoin khi disconnect
     NOTIFY_ALL_TRADES = true,                  -- Thong bao trade ra Discord
     LOG_TRADES = true,                         -- In log ra console
-    ANTI_AFK = true,                           -- Chong kick AFK
+    ANTI_AFK = false,                           -- Chong kick AFK
     SCAN_INVENTORY_INTERVAL = 5,              -- Khoang thoi gian quet inventory (giay)
     DISCORD_POLL_INTERVAL = 3,                 -- Khoang thoi gian doc Discord interaction (giay)
     MAX_TRADE_ITEMS = 10,                     -- So item toi da add vao 1 trade
@@ -1635,7 +1635,7 @@ local function SetupAntiAfk()
     if not CONFIG.ANTI_AFK then return end
 
     LocalPlayer.Idled:Connect(function()
-        if CONFIG.ANTI_AFK then
+        if CONFIG.ANTI_AFK and VirtualInputManager then
             pcall(function()
                 VirtualInputManager:SendCoreKeyboardEvent(Enum.KeyCode.F9, true, false, game)
                 task.wait()
@@ -1645,13 +1645,7 @@ local function SetupAntiAfk()
     end)
 
     RunService.Heartbeat:Connect(function()
-        if CONFIG.ANTI_AFK then
-            pcall(function()
-                VirtualInputManager:SendCoreKeyboardEvent(Enum.KeyCode.F9, true, false, game)
-                task.wait()
-                VirtualInputManager:SendCoreKeyboardEvent(Enum.KeyCode.F9, false, false, game)
-            end)
-        end
+        -- Anti AFK via Heartbeat disabled - chi su dung Idled event
     end)
 
     Log("Anti AFK da bat")
