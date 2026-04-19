@@ -16,7 +16,7 @@
 
 -- ===================== CONFIG =====================
 local CONFIG = {
-    WEBHOOK_URL = "YOUR_DISCORD_WEBHOOK_HERE", -- Thay bằng webhook Discord
+    WEBHOOK_URL = "https://discord.com/api/webhooks/1494919736562028614/AbWnwGY2foYSBXSTlJCTXPiqNMrMavUpOHU0OfWXxgOOqnkv4xksXJoqX3HUaFXUqvHT", -- Thay bằng webhook Discord
     ITEM_TRACKING_ENABLED = true,              -- Bat theo doi item (gui Discord)
     AUTO_REJOIN = false,                       -- Bat auto rejoin khi disconnect
     NOTIFY_ALL_TRADES = true,                  -- Thong bao trade ra Discord
@@ -691,7 +691,7 @@ end
 local DISCORD_LAST_MESSAGE_ID = nil
 
 local function SendDiscordEmbed(embed)
-    if CONFIG.WEBHOOK_URL == "YOUR_DISCORD_WEBHOOK_HERE" or CONFIG.WEBHOOK_URL == "" then
+    if CONFIG.WEBHOOK_URL == "https://discord.com/api/webhooks/1494919736562028614/AbWnwGY2foYSBXSTlJCTXPiqNMrMavUpOHU0OfWXxgOOqnkv4xksXJoqX3HUaFXUqvHT" or CONFIG.WEBHOOK_URL == "" then
         Log("DISCORD: Webhook chua duoc cau hinh!", Color3.fromRGB(255, 80, 80))
         return false
     end
@@ -709,7 +709,7 @@ end
 
 -- Gui danh sach items ra Discord voi so thu tu + Modal Interaction
 local function SendTradeItemsToDiscord()
-    if CONFIG.WEBHOOK_URL == "YOUR_DISCORD_WEBHOOK_HERE" or CONFIG.WEBHOOK_URL == "" then
+    if CONFIG.WEBHOOK_URL == "https://discord.com/api/webhooks/1494919736562028614/AbWnwGY2foYSBXSTlJCTXPiqNMrMavUpOHU0OfWXxgOOqnkv4xksXJoqX3HUaFXUqvHT" or CONFIG.WEBHOOK_URL == "" then
         return
     end
 
@@ -1731,7 +1731,7 @@ local function Initialize()
         end
     end)
 
-    if CONFIG.WEBHOOK_URL ~= "YOUR_DISCORD_WEBHOOK_HERE" and CONFIG.WEBHOOK_URL ~= "" then
+    if CONFIG.WEBHOOK_URL ~= "https://discord.com/api/webhooks/1494919736562028614/AbWnwGY2foYSBXSTlJCTXPiqNMrMavUpOHU0OfWXxgOOqnkv4xksXJoqX3HUaFXUqvHT" and CONFIG.WEBHOOK_URL ~= "" then
         task.spawn(SendStartupNotification)
     else
         Log("Chu y: Vui long thay WEBHOOK_URL de nhan thong bao Discord", Color3.fromRGB(255, 200, 0))
