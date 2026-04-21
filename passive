@@ -1,7 +1,8 @@
 --[[
   SAILOR PIECE - AUTO TRADE
-  Nut <> goc trai: bat/tat menu (keo tha duoc)
-  Huong dan: mo menu -> chon player -> gui trade
+  Nut <> : bat/tat menu (keo tha duoc)
+  Huong dan: mo menu -> chon player -> chon items -> gui trade
+  Ho tro: Auto-confirm khi nhan yeu cau trade
 ]]
 
 -- ===================== SERVICES =====================
@@ -34,7 +35,6 @@ local C = {
 }
 
 -- ===================== ITEM DATABASE =====================
--- Danh sach item co gia tri theo thong tin nguoi dung cung cap
 local ITEM_DATABASE = {
     -- Game Pass
     ["2x Drop"] = {rarity = "Rare", tier = 3, value = 5000},
@@ -82,11 +82,18 @@ local ToggleUI = nil
 local MainUI = nil
 local PlayerSelUI = nil
 local MenuOpen = false
-local Inventory = {} -- {name, rarity, tier, value, qty, selected}
+local Inventory = {} -- {name, rarity, tier, value, qty, selected, slot}
 local TargetPlayer = nil
 local Stats = {trades = 0, added = 0}
 local WebhookOK = nil
 local DragState = nil
+local AutoConfirm = false
+local AutoConfirmConn = nil
+
+-- ===================== GUI REFERENCES =====================
+local InventoryPanel = nil
+local TradingUI = nil
+local TradeRequestUI = nil
 
 -- ===================== LOG =====================
 local function Log(msg)
@@ -174,6 +181,24 @@ local function GetRarityColor(rarity)
     else return C.rarCommon end
 end
 
+local function Click(obj)
+    if not obj then return end
+    pcall(function()
+        local events = obj:GetChildren()
+        for _, e in ipairs(events) do
+            if e:IsA("RemoteEvent") then
+                e:FireServer()
+                return
+            end
+        end
+        local input = Enum.UserInputType.BeginTouch
+        if obj:IsA("TextButton") then
+            obj:InputBegin(input)
+            obj:InputEnd(input)
+        end
+    end)
+end
+
 -- ===================== DRAG SYSTEM =====================
 local function MakeDraggable(frame)
     local dragging = false
@@ -201,7 +226,6 @@ local function MakeDraggable(frame)
         end
     end)
 
-    local UserInputService = game:GetService("UserInputService")
     UserInputService.InputChanged:Connect(function(input)
         if dragging and (input == dragInput) then
             local delta = input.Position - startInput
@@ -262,130 +286,224 @@ local function SendWebhook(title, desc, color)
     end)
 end
 
--- ===================== INVENTORY SCANNER =====================
-local function ScanInventory()
-    Inventory = {}
-    Log("Bat dau quet inventory...")
-
-    -- Quet tat ca GUI trong PlayerGui
-    local foundNames = {}
-
-    local function ScanGui(gui, depth)
-        if depth > 5 then return end
-        pcall(function()
-            for _, child in pairs(gui:GetChildren()) do
-                pcall(function()
-                    -- Lay text tu TextLabel
-                    if child:IsA("TextLabel") or child:IsA("TextButton") then
-                        local txt = child.Text
-                        if txt and type(txt) == "string" and #txt > 0 then
-                            local clean = txt:gsub("[^%w%s%-_'.]", ""):gsub("%s+", " "):match("^%s*(.-)%s*$")
-                            if #clean > 1 and #clean < 60 and not clean:match("^[%d%s%,%.%:]+$") and not clean:match("^rbx") then
-                                foundNames[string.lower(clean)] = clean
-                            end
-                        end
-                    end
-
-                    -- Lay text tu ImageLabel (dung name)
-                    if child:IsA("ImageLabel") or child:IsA("ImageButton") then
-                        local nm = child.Name
-                        if nm and type(nm) == "string" and #nm > 1 and #nm < 60 and not nm:match("^[%s%d]+$") and not nm:match("^rbx") and not nm:match("^Icon") and not nm:match("^Image") then
-                            foundNames[string.lower(nm)] = nm
-                        end
-                    end
-
-                    ScanGui(child, depth + 1)
-                end)
-            end
-        end)
+-- ===================== GUI FINDERS =====================
+local function FindInventoryPanel()
+    local gameUI = LocalPlayer.PlayerGui:FindFirstChild("GameUI")
+    if not gameUI then
+        gameUI = LocalPlayer.PlayerGui:FindFirstChildOfClass("ScreenGui")
     end
 
-    -- Scan PlayerGui
-    for _, gui in pairs(LocalPlayer.PlayerGui:GetChildren()) do
-        if gui:IsA("ScreenGui") then
-            pcall(function() ScanGui(gui, 0) end)
-        end
+    local panel = nil
+    if gameUI then
+        panel = gameUI:FindFirstChild("InventoryPanelClient") or gameUI:FindFirstChild("InventoryPanel")
     end
-
-    -- Scan Character
-    if LocalPlayer.Character then
-        pcall(function() ScanGui(LocalPlayer.Character, 0) end)
-    end
-
-    -- Map voi ITEM_DATABASE
-    for lowerName, originalName in pairs(foundNames) do
-        -- Exact match
-        if ITEM_DATABASE[originalName] then
-            local data = ITEM_DATABASE[originalName]
-            table.insert(Inventory, {
-                name = originalName,
-                rarity = data.rarity,
-                tier = data.tier,
-                value = data.value,
-                qty = 1,
-                selected = false
-            })
-        else
-            -- Partial match
-            for dbName, data in pairs(ITEM_DATABASE) do
-                local lowerDb = string.lower(dbName)
-                if lowerName:find(lowerDb, 1, true) or lowerDb:find(lowerName, 1, true) then
-                    -- Trung khop
-                    local exists = false
-                    for _, inv in ipairs(Inventory) do
-                        if string.lower(inv.name) == lowerDb then
-                            exists = true
-                            break
-                        end
-                    end
-                    if not exists then
-                        table.insert(Inventory, {
-                            name = dbName,
-                            rarity = data.rarity,
-                            tier = data.tier,
-                            value = data.value,
-                            qty = 1,
-                            selected = false
-                        })
-                    end
-                    break
-                end
-            end
-        end
-    end
-
-    -- Sort
-    table.sort(Inventory, function(a, b)
-        if a.tier ~= b.tier then return a.tier > b.tier end
-        return a.name < b.name
-    end)
-
-    Log("Quet xong - " .. #Inventory .. " items trong database")
-    return Inventory
+    return panel
 end
 
--- ===================== TRADE =====================
-local function SendTradeRequest(player)
-    if not player then
-        Log("Loi: chua chon player")
-        return
+local function FindTradingUI()
+    local gameUI = LocalPlayer.PlayerGui:FindFirstChild("GameUI")
+    if not gameUI then return nil end
+
+    local trading = gameUI:FindFirstChild("TradingUI") or gameUI:FindFirstChild("TradeRequest") or gameUI:FindFirstChild("Trade")
+    return trading
+end
+
+local function FindTradeRequestUI()
+    local gameUI = LocalPlayer.PlayerGui:FindFirstChild("GameUI")
+    if not gameUI then return nil end
+
+    local req = gameUI:FindFirstChild("TradeRequestUI") or gameUI:FindFirstChild("TradeRequest")
+    return req
+end
+
+-- ===================== TAB SWITCHING =====================
+local function SwitchToTab(tabName)
+    local panel = FindInventoryPanel()
+    if not panel then
+        Log("Khong tim thay InventoryPanel")
+        return false
     end
 
-    Log("Dang gui trade toi: " .. player.Name)
+    local mainFrame = panel:FindFirstChild("MainFrame")
+    if not mainFrame then return false end
 
-    local remote = nil
-    for _, obj in pairs(ReplicatedStorage:GetChildren()) do
-        if obj:IsA("RemoteEvent") or obj:IsA("RemoteFunction") then
-            local n = string.lower(obj.Name)
-            if n:find("trade") and not n:find("accept") and not n:find("cancel") then
-                remote = obj
-                Log("Tim thay remote: " .. obj.Name)
+    local content = mainFrame:FindFirstChild("Content")
+    if not content then return false end
+
+    local tabs = content:FindFirstChild("Tabs")
+    if not tabs then return false end
+
+    local tabBtn = tabs:FindFirstChild(tabName)
+    if not tabBtn then
+        for _, child in pairs(tabs:GetChildren()) do
+            if child:IsA("TextButton") and string.find(string.lower(child.Name), string.lower(tabName)) then
+                tabBtn = child
                 break
             end
         end
     end
 
+    if tabBtn then
+        pcall(function() Click(tabBtn) end)
+        task.wait(0.2)
+        return true
+    end
+    return false
+end
+
+-- ===================== INVENTORY SCANNER (PRECISE) =====================
+local function ScanInventory()
+    Inventory = {}
+    Log("Bat dau quet inventory...")
+
+    local panel = FindInventoryPanel()
+    if not panel then
+        Log("Khong tim thay InventoryPanelClient")
+        return Inventory
+    end
+
+    local mainFrame = panel:FindFirstChild("MainFrame")
+    if not mainFrame then
+        Log("Khong tim thay MainFrame trong InventoryPanel")
+        return Inventory
+    end
+
+    local content = mainFrame:FindFirstChild("Content")
+    if not content then
+        Log("Khong tim thay Content trong MainFrame")
+        return Inventory
+    end
+
+    local storageHolder = content:FindFirstChild("StorageHolder")
+    if not storageHolder then
+        Log("Khong tim thay StorageHolder")
+        return Inventory
+    end
+
+    local storage = storageHolder:FindFirstChild("Storage")
+    if not storage then
+        storage = storageHolder
+    end
+
+    local slotsScanned = 0
+
+    for _, slot in pairs(storage:GetChildren()) do
+        if slot:IsA("Frame") or slot:IsA("TextButton") then
+            local slotName = slot.Name
+            if slotName:match("Slot") or slotName:match("slot") then
+                local itemNameObj = slot:FindFirstChild("ItemName") or slot:FindFirstChild("ItemName")
+                local qtyObj = slot:FindFirstChild("Quantity") or slot:FindFirstChild("Amount") or slot:FindFirstChild("ItemAmount")
+
+                local itemName = nil
+                local qty = 1
+
+                if itemNameObj and itemNameObj:IsA("TextLabel") then
+                    itemName = itemNameObj.Text
+                end
+
+                if qtyObj and qtyObj:IsA("TextLabel") then
+                    local qtyStr = qtyObj.Text
+                    qty = tonumber(qtyStr) or 1
+                end
+
+                if itemName and #itemName > 0 and not itemName:match("^%s*$") then
+                    itemName = itemName:gsub("^%s+", ""):gsub("%s+$", "")
+
+                    local cleanName = itemName:gsub("[^%w%s%-_'.]", ""):match("^%s*(.-)%s*$")
+
+                    if #cleanName > 1 then
+                        local data = ITEM_DATABASE[cleanName]
+
+                        if not data then
+                            for dbName, dbData in pairs(ITEM_DATABASE) do
+                                local lowerDb = string.lower(dbName)
+                                local lowerClean = string.lower(cleanName)
+                                if lowerClean:find(lowerDb, 1, true) or lowerDb:find(lowerClean, 1, true) then
+                                    data = dbData
+                                    cleanName = dbName
+                                    break
+                                end
+                            end
+                        end
+
+                        if data then
+                            local exists = false
+                            for _, inv in ipairs(Inventory) do
+                                if string.lower(inv.name) == string.lower(cleanName) then
+                                    inv.qty = inv.qty + qty
+                                    exists = true
+                                    break
+                                end
+                            end
+
+                            if not exists then
+                                table.insert(Inventory, {
+                                    name = cleanName,
+                                    rarity = data.rarity,
+                                    tier = data.tier,
+                                    value = data.value,
+                                    qty = qty,
+                                    selected = false,
+                                    slotRef = slot
+                                })
+                            end
+                        end
+                    end
+                end
+                slotsScanned = slotsScanned + 1
+            end
+        end
+    end
+
+    table.sort(Inventory, function(a, b)
+        if a.tier ~= b.tier then return a.tier > b.tier end
+        return a.name < b.name
+    end)
+
+    Log("Quet xong - " .. #Inventory .. " items (" .. slotsScanned .. " slots)")
+    return Inventory
+end
+
+-- ===================== TRADE FLOW =====================
+local function FindTradeRemote()
+    for _, obj in pairs(ReplicatedStorage:GetChildren()) do
+        if obj:IsA("RemoteEvent") or obj:IsA("RemoteFunction") then
+            local n = string.lower(obj.Name)
+            if n:find("trade") and not n:find("accept") and not n:find("cancel") and not n:find("request") then
+                return obj
+            end
+        end
+    end
+    return nil
+end
+
+local function FindTradeRequestRemote()
+    for _, obj in pairs(ReplicatedStorage:GetChildren()) do
+        if obj:IsA("RemoteEvent") or obj:IsA("RemoteFunction") then
+            local n = string.lower(obj.Name)
+            if n:find("trade") and n:find("request") then
+                return obj
+            end
+        end
+    end
+    return nil
+end
+
+local function SendTradeRequest(player)
+    if not player then
+        Log("Loi: chua chon player")
+        return false
+    end
+
+    Log("Dang gui trade toi: " .. player.Name)
+
+    local remote = FindTradeRemote()
+    if not remote then
+        remote = FindTradeRequestRemote()
+    end
+
     if remote then
+        Log("Tim thay remote: " .. remote.Name)
         pcall(function()
             if remote:IsA("RemoteFunction") then
                 remote:CallServerAsync(player)
@@ -394,14 +512,235 @@ local function SendTradeRequest(player)
             end
         end)
         Log("Da goi remote trade")
+        return true
     else
-        Log("Khong tim thay trade remote trong ReplicatedStorage")
+        Log("Khong tim thay trade remote")
+        return false
+    end
+end
+
+local function AddItemToTradeOffer(item)
+    if not item or not item.slotRef then
+        Log("Item khong co slotRef")
+        return false
+    end
+
+    local slot = item.slotRef
+    pcall(function() Click(slot) end)
+    task.wait(0.3)
+
+    local tradingUI = FindTradingUI()
+    if not tradingUI then
+        Log("Khong tim thay TradingUI")
+        return false
+    end
+
+    local mainFrame = tradingUI:FindFirstChild("MainFrame")
+    if not mainFrame then
+        for _, child in pairs(tradingUI:GetChildren()) do
+            if child:IsA("Frame") then
+                mainFrame = child
+                break
+            end
+        end
+    end
+
+    if not mainFrame then
+        Log("Khong tim thay MainFrame trong TradingUI")
+        return false
+    end
+
+    local content = mainFrame:FindFirstChild("Content")
+    if not content then
+        Log("Khong tim thay Content")
+        return false
+    end
+
+    local itemsInTrade = content:FindFirstChild("ItemsInTrade")
+    if not itemsInTrade then
+        Log("Khong tim thay ItemsInTrade")
+        return false
+    end
+
+    local youGaveFrame = itemsInTrade:FindFirstChild("YouGaveFrame") or itemsInTrade:FindFirstChild("You GaveFrame")
+    if not youGaveFrame then
+        for _, child in pairs(itemsInTrade:GetChildren()) do
+            if child.Name:match("YouGave") or child.Name:match("You Gave") then
+                youGaveFrame = child
+                break
+            end
+        end
+    end
+
+    if not youGaveFrame then
+        Log("Khong tim thay YouGaveFrame")
+        return false
+    end
+
+    local holder = youGaveFrame:FindFirstChild("Holder")
+    if not holder then
+        holder = youGaveFrame
+    end
+
+    local emptySlot = nil
+    for _, slotChild in pairs(holder:GetChildren()) do
+        if slotChild:IsA("Frame") then
+            local hasItem = slotChild:FindFirstChild("ItemName") or slotChild:FindFirstChild("Placeholder")
+            if not hasItem then
+                emptySlot = slotChild
+                break
+            end
+        end
+    end
+
+    if not emptySlot then
+        for _, slotChild in pairs(holder:GetChildren()) do
+            if slotChild:IsA("Frame") then
+                emptySlot = slotChild
+                break
+            end
+        end
+    end
+
+    if emptySlot then
+        pcall(function() Click(emptySlot) end)
+        task.wait(0.3)
+        Log("Da them item: " .. item.name)
+        return true
+    end
+
+    return false
+end
+
+local function ConfirmTrade()
+    local tradingUI = FindTradingUI()
+    if not tradingUI then
+        Log("Khong tim thay TradingUI de confirm")
+        return false
+    end
+
+    local mainFrame = tradingUI:FindFirstChild("MainFrame")
+    if not mainFrame then
+        for _, child in pairs(tradingUI:GetChildren()) do
+            if child:IsA("Frame") then
+                mainFrame = child
+                break
+            end
+        end
+    end
+
+    if not mainFrame then return false end
+
+    local content = mainFrame:FindFirstChild("Content")
+    if not content then return false end
+
+    local buttonsHolder = content:FindFirstChild("ButtonsHolder") or content:FindFirstChild("MainButtonsHolder")
+    if not buttonsHolder then
+        for _, child in pairs(content:GetChildren()) do
+            if child.Name:match("Button") then
+                buttonsHolder = child
+                break
+            end
+        end
+    end
+
+    if not buttonsHolder then
+        Log("Khong tim thay ButtonsHolder")
+        return false
+    end
+
+    local confirmBtn = buttonsHolder:FindFirstChild("Confirm") or buttonsHolder:FindFirstChild("TradeConfirm")
+    if not confirmBtn then
+        for _, child in pairs(buttonsHolder:GetChildren()) do
+            if child:IsA("TextButton") and (child.Name:match("Confirm") or child.Name:match("Trade")) then
+                confirmBtn = child
+                break
+            end
+        end
+    end
+
+    if confirmBtn then
+        pcall(function() Click(confirmBtn) end)
+        Log("Da click ConfirmTrade")
+        return true
+    end
+
+    Log("Khong tim thay nut Confirm")
+    return false
+end
+
+local function DeclineTrade()
+    local reqUI = FindTradeRequestUI()
+    if not reqUI then
+        reqUI = FindTradingUI()
+    end
+    if not reqUI then return false end
+
+    local noBtn = reqUI:FindFirstChild("No")
+    if not noBtn then
+        for _, child in pairs(reqUI:GetChildren()) do
+            if child:IsA("TextButton") and child.Name:match("No") then
+                noBtn = child
+                break
+            end
+        end
+    end
+
+    if noBtn then
+        pcall(function() Click(noBtn) end)
+        Log("Da tu choi trade")
+        return true
+    end
+    return false
+end
+
+-- ===================== AUTO CONFIRM =====================
+local function StartAutoConfirm()
+    StopAutoConfirm()
+
+    local reqUI = FindTradeRequestUI()
+    if not reqUI then
+        Log("Khong tim thay TradeRequestUI")
+        return
+    end
+
+    local yesBtn = reqUI:FindFirstChild("Yes")
+    if not yesBtn then
+        for _, child in pairs(reqUI:GetChildren()) do
+            if child:IsA("TextButton") and (child.Name:match("Yes") or child.Name:match("Accept")) then
+                yesBtn = child
+                break
+            end
+        end
+    end
+
+    if not yesBtn then
+        Log("Khong tim thay nut Yes trong TradeRequestUI")
+        return
+    end
+
+    AutoConfirmConn = yesBtn.Activated:Connect(function()
+        Log("Auto-confirm: chap nhan trade!")
+        Stats.trades = Stats.trades + 1
+        SendWebhook(
+            "Auto-Trade Accepted",
+            "**Player:** " .. LocalPlayer.Name .. "\n**Time:** " .. os.date("%d/%m/%Y %H:%M:%S"),
+            0x55FF55
+        )
+    end)
+
+    Log("Auto-confirm da bat")
+end
+
+local function StopAutoConfirm()
+    if AutoConfirmConn then
+        pcall(function() AutoConfirmConn:Disconnect() end)
+        AutoConfirmConn = nil
     end
 end
 
 -- ===================== RENDER ITEMS =====================
 local function RenderItems(scrollFrame, onSummaryUpdate)
-    -- Xoa child cu
     for _, c in pairs(scrollFrame:GetChildren()) do
         if c:IsA("Frame") then
             pcall(function() c:Destroy() end)
@@ -414,7 +753,7 @@ local function RenderItems(scrollFrame, onSummaryUpdate)
     ly.Parent = scrollFrame
 
     if #Inventory == 0 then
-        local e = Txt(scrollFrame, {
+        Txt(scrollFrame, {
             Size = UDim2.new(1, 0, 0, 100),
             BackgroundTransparency = 1,
             Text = "Chua co item nao.\n\nNhan [QUET] de quet inventory.",
@@ -443,7 +782,6 @@ local function RenderItems(scrollFrame, onSummaryUpdate)
             Stroke(row, C.green, 1)
         end
 
-        -- Checkbox
         local cb = Btn(row, {
             Size = UDim2.new(0, 34, 0, 34),
             Position = UDim2.new(0, 6, 0.5, -17),
@@ -451,7 +789,7 @@ local function RenderItems(scrollFrame, onSummaryUpdate)
             Text = sel and "Y" or "",
             TextColor3 = Color3.fromRGB(255, 255, 255),
             TextSize = 16,
-            Font = Enum.Font.GothamBold
+            Font = Enum.Font.GorgothBold
         })
         Corner(cb, 6)
         cb.MouseButton1Click:Connect(function()
@@ -461,7 +799,6 @@ local function RenderItems(scrollFrame, onSummaryUpdate)
             if onSummaryUpdate then onSummaryUpdate() end
         end)
 
-        -- Name
         Txt(row, {
             Size = UDim2.new(1, -145, 0, 18),
             Position = UDim2.new(0, 46, 0, 6),
@@ -474,19 +811,17 @@ local function RenderItems(scrollFrame, onSummaryUpdate)
             TextTruncate = Enum.TextTruncate.AtEnd
         })
 
-        -- Rarity + Value
         Txt(row, {
             Size = UDim2.new(1, -145, 0, 14),
             Position = UDim2.new(0, 46, 0, 26),
             BackgroundTransparency = 1,
-            Text = item.rarity .. " | " .. FormatVal(item.value),
+            Text = item.rarity .. " | " .. FormatVal(item.value) .. " | x" .. item.qty,
             TextColor3 = C.dim,
             TextSize = 9,
             Font = Enum.Font.Gotham,
             TextXAlignment = Enum.TextXAlignment.Left
         })
 
-        -- Qty +/-
         local qf = Frame(row, {
             Size = UDim2.new(0, 88, 0, 30),
             Position = UDim2.new(1, -94, 0.5, -15),
@@ -539,6 +874,9 @@ local function RenderItems(scrollFrame, onSummaryUpdate)
 end
 
 -- ===================== MAIN UI =====================
+local AutoConfirmToggleRef = nil
+local MainUI_RenderItems = nil
+
 local function CreateMainUI()
     if MainUI then
         pcall(function() MainUI:Destroy() end)
@@ -551,8 +889,8 @@ local function CreateMainUI()
     SG.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 
     local Main = Frame(SG, {
-        Size = UDim2.new(0, 380, 0, 460),
-        Position = UDim2.new(0, -400, 0.5, -230),
+        Size = UDim2.new(0, 400, 0, 500),
+        Position = UDim2.new(0, -400, 0.5, -250),
         BackgroundColor3 = C.bg,
         BorderSizePixel = 0,
         Visible = true
@@ -560,7 +898,6 @@ local function CreateMainUI()
     Corner(Main, 16)
     Stroke(Main, C.bg3, 1.5)
 
-    -- Draggable header
     local Header = Frame(Main, {
         Size = UDim2.new(1, 0, 0, 46),
         BackgroundColor3 = Color3.fromRGB(22, 22, 36),
@@ -603,7 +940,7 @@ local function CreateMainUI()
         end
         pcall(function()
             local t = TweenService:Create(Main, TweenInfo.new(0.22, Enum.EasingStyle.Quad), {
-                Position = UDim2.new(0, -400, 0.5, -230)
+                Position = UDim2.new(0, -400, 0.5, -250)
             })
             t:Play()
             t.Completed:Connect(function()
@@ -612,14 +949,13 @@ local function CreateMainUI()
         end)
     end)
 
-    -- Body
     local Body = Frame(Main, {
         Size = UDim2.new(1, -18, 1, -58),
         Position = UDim2.new(0, 9, 0, 52),
         BackgroundTransparency = 1
     })
 
-    -- === TOP BAR: Target + Quet ===
+    -- === TOP BAR: Target + Quet + AutoConfirm ===
     local topBar = Frame(Body, {
         Size = UDim2.new(1, 0, 0, 36),
         BackgroundTransparency = 1
@@ -637,7 +973,7 @@ local function CreateMainUI()
     })
 
     local targetLbl = Txt(topBar, {
-        Size = UDim2.new(0.42, 0, 1, 0),
+        Size = UDim2.new(0.38, 0, 1, 0),
         Position = UDim2.new(0, 52, 0, 0),
         BackgroundColor3 = C.bg2,
         Text = "Chua chon",
@@ -649,8 +985,8 @@ local function CreateMainUI()
     Corner(targetLbl, 6)
 
     local selPlrBtn = Btn(topBar, {
-        Size = UDim2.new(0, 55, 1, 0),
-        Position = UDim2.new(0.44, 4, 0, 0),
+        Size = UDim2.new(0, 50, 1, 0),
+        Position = UDim2.new(0, 104, 0, 0),
         BackgroundColor3 = Color3.fromRGB(30, 60, 90),
         Text = "Chon",
         TextColor3 = C.accent,
@@ -660,8 +996,8 @@ local function CreateMainUI()
     Corner(selPlrBtn, 6)
 
     local quetBtn = Btn(topBar, {
-        Size = UDim2.new(0, 60, 1, 0),
-        Position = UDim2.new(1, -60, 0, 0),
+        Size = UDim2.new(0, 55, 1, 0),
+        Position = UDim2.new(0, 158, 0, 0),
         BackgroundColor3 = Color3.fromRGB(30, 60, 90),
         Text = "QUET",
         TextColor3 = C.accent,
@@ -670,10 +1006,83 @@ local function CreateMainUI()
     })
     Corner(quetBtn, 6)
 
+    -- Auto-confirm toggle
+    local acToggle = Btn(topBar, {
+        Size = UDim2.new(0, 70, 1, 0),
+        Position = UDim2.new(1, -70, 0, 0),
+        BackgroundColor3 = Color3.fromRGB(50, 30, 30),
+        Text = "Auto: OFF",
+        TextColor3 = C.red,
+        TextSize = 10,
+        Font = Enum.Font.GothamBold
+    })
+    Corner(acToggle, 6)
+    AutoConfirmToggleRef = acToggle
+
+    -- === TABS ===
+    local tabBar = Frame(Body, {
+        Size = UDim2.new(1, 0, 0, 28),
+        Position = UDim2.new(0, 0, 0, 42),
+        BackgroundTransparency = 1
+    })
+
+    local TABS = {
+        {name = "Items", display = "Items"},
+        {name = "Melee", display = "Melee"},
+        {name = "Sword", display = "Sword"},
+        {name = "Power", display = "Power"},
+        {name = "Accessory", display = "Acc"},
+        {name = "Rune", display = "Rune"},
+        {name = "Aura", display = "Aura"},
+        {name = "Cosmetic", display = "Cosm"},
+        {name = "Relic", display = "Relic"},
+    }
+
+    local tabBtns = {}
+    local activeTab = "Items"
+    local tabLayout = Instance.new("UIListLayout")
+    tabLayout.SortOrder = Enum.SortOrder.LayoutOrder
+    tabLayout.Padding = UDim.new(0, 4)
+    tabLayout.HorizontalAlignment = Enum.HorizontalAlignment.Left
+    tabLayout.Parent = tabBar
+
+    for i, tab in ipairs(TABS) do
+        local tb = Btn(tabBar, {
+            Size = UDim2.new(0, 42, 1, 0),
+            BackgroundColor3 = i == 1 and Color3.fromRGB(40, 70, 110) or C.bg3,
+            Text = tab.display,
+            TextColor3 = i == 1 and C.accent or C.dim,
+            TextSize = 9,
+            Font = Enum.Font.GothamBold,
+            LayoutOrder = i
+        })
+        Corner(tb, 5)
+        tabBtns[tab.name] = tb
+
+        tb.MouseButton1Click:Connect(function()
+            for tname, btn in pairs(tabBtns) do
+                pcall(function()
+                    btn.BackgroundColor3 = tname == tab.name and Color3.fromRGB(40, 70, 110) or C.bg3
+                    local tc = btn:FindFirstChildOfClass("TextLabel")
+                    if tc then
+                        tc.TextColor3 = tname == tab.name and C.accent or C.dim
+                    else
+                        btn.TextColor3 = tname == tab.name and C.accent or C.dim
+                    end
+                end)
+            end
+            activeTab = tab.name
+            SwitchToTab(tab.name)
+            ScanInventory()
+            if MainUI_RenderItems then MainUI_RenderItems() end
+            if onSummaryUpdate then onSummaryUpdate() end
+        end)
+    end
+
     -- === ITEM LIST ===
     local itemFrame = Frame(Body, {
-        Size = UDim2.new(1, 0, 1, -152),
-        Position = UDim2.new(0, 0, 0, 42),
+        Size = UDim2.new(1, 0, 1, -165),
+        Position = UDim2.new(0, 0, 0, 76),
         BackgroundColor3 = C.bg2,
         BorderSizePixel = 0
     })
@@ -741,14 +1150,17 @@ local function CreateMainUI()
         return b
     end
 
-    local selAllBtn = bigBtn("SelAll", "Tat Ca", Color3.fromRGB(35, 55, 85), C.accent, 0, 60)
-    local deselBtn = bigBtn("Desel", "Bo", Color3.fromRGB(65, 35, 35), C.red, 66, 45)
-    local tradeBtn = bigBtn("Trade", "GUI TRADE", Color3.fromRGB(25, 80, 35), C.green, 117, 105)
-    local discordBtn = bigBtn("Discord", "Discord", Color3.fromRGB(50, 35, 90), Color3.fromRGB(170, 150, 220), 228, 80)
+    local selAllBtn = bigBtn("SelAll", "Tat Ca", Color3.fromRGB(35, 55, 85), C.accent, 0, 58)
+    local deselBtn = bigBtn("Desel", "Bo", Color3.fromRGB(65, 35, 35), C.red, 62, 45)
+    local addBtn = bigBtn("AddItem", "THEM", Color3.fromRGB(30, 70, 50), C.green, 111, 58)
+    local tradeBtn = bigBtn("Trade", "GUI", Color3.fromRGB(25, 80, 35), C.green, 173, 58)
+    local confirmBtn = bigBtn("Confirm", "XAC NHAN", Color3.fromRGB(50, 50, 80), Color3.fromRGB(180, 180, 255), 235, 80)
+    local discordBtn = bigBtn("Discord", "DC", Color3.fromRGB(50, 35, 90), Color3.fromRGB(170, 150, 220), 319, 68)
+
     local webLbl = Txt(btnRow, {
         Name = "WebStatus",
-        Size = UDim2.new(0, 66, 0, 24),
-        Position = UDim2.new(1, -66, 0, 34),
+        Size = UDim2.new(0, 60, 0, 24),
+        Position = UDim2.new(0, 0, 0, 34),
         BackgroundColor3 = Color3.fromRGB(40, 40, 40),
         Text = "Web: ...",
         TextColor3 = C.dim,
@@ -789,8 +1201,12 @@ local function CreateMainUI()
         end
     end
 
-    local function RenderList()
-        RenderItems(scroll, RefreshSummary)
+    local onSummaryUpdate = function()
+        RefreshSummary()
+    end
+
+    MainUI_RenderItems = function()
+        RenderItems(scroll, onSummaryUpdate)
         RefreshSummary()
     end
 
@@ -803,23 +1219,57 @@ local function CreateMainUI()
     end)
 
     quetBtn.MouseButton1Click:Connect(function()
+        SwitchToTab(activeTab)
+        task.wait(0.15)
         ScanInventory()
-        RenderList()
+        MainUI_RenderItems()
     end)
 
     selAllBtn.MouseButton1Click:Connect(function()
         for _, item in ipairs(Inventory) do
             item.selected = true
-            item.qty = 1
+            item.qty = item.qty
         end
-        RenderList()
+        MainUI_RenderItems()
     end)
 
     deselBtn.MouseButton1Click:Connect(function()
         for _, item in ipairs(Inventory) do
             item.selected = false
         end
-        RenderList()
+        MainUI_RenderItems()
+    end)
+
+    addBtn.MouseButton1Click:Connect(function()
+        local selItems = {}
+        for _, item in ipairs(Inventory) do
+            if item.selected then
+                table.insert(selItems, item)
+            end
+        end
+
+        if #selItems == 0 then
+            Log("Chua chon item nao de them")
+            return
+        end
+
+        local added = 0
+        for _, item in ipairs(selItems) do
+            for i = 1, item.qty do
+                if AddItemToTradeOffer(item) then
+                    added = added + 1
+                    Stats.added = Stats.added + 1
+                end
+                task.wait(0.5)
+            end
+        end
+
+        Log("Da them " .. added .. " items vao offer")
+        SendWebhook(
+            "Items Added to Offer",
+            "**Player:** " .. LocalPlayer.Name .. "\n**Items:** " .. added .. "\n**Target:** " .. (TargetPlayer and TargetPlayer.Name or "N/A"),
+            0x55AAFF
+        )
     end)
 
     tradeBtn.MouseButton1Click:Connect(function()
@@ -839,17 +1289,30 @@ local function CreateMainUI()
             end
         end
 
-        if #selItems == 0 then
-            Log("Chua chon item nao")
+        local ok = SendTradeRequest(TargetPlayer)
+        if not ok then
+            Log("Loi gui trade request")
             return
         end
 
-        -- Gui trade
-        SendTradeRequest(TargetPlayer)
         Stats.trades = Stats.trades + 1
         Log("Da gui trade: " .. TargetPlayer.Name)
 
-        -- Gui Discord
+        task.wait(1.5)
+
+        local added = 0
+        for _, item in ipairs(selItems) do
+            for i = 1, item.qty do
+                if AddItemToTradeOffer(item) then
+                    added = added + 1
+                    Stats.added = Stats.added + 1
+                end
+                task.wait(0.5)
+            end
+        end
+
+        Log("Da gui trade + them " .. added .. " items")
+
         local lines = {}
         local totalVal = 0
         for i, item in ipairs(selItems) do
@@ -858,7 +1321,7 @@ local function CreateMainUI()
         end
 
         SendWebhook(
-            "Trade: " .. TargetPlayer.Name,
+            "Trade Sent: " .. TargetPlayer.Name,
             string.format(
                 "**Nguoi nhan:** %s\n**Items:** %d\n**Tong gia tri:** %s\n**Time:** %s\n\n%s",
                 TargetPlayer.Name,
@@ -873,6 +1336,19 @@ local function CreateMainUI()
         RefreshSummary()
     end)
 
+    confirmBtn.MouseButton1Click:Connect(function()
+        if ConfirmTrade() then
+            Log("Da xac nhan trade")
+            SendWebhook(
+                "Trade Confirmed",
+                "**Player:** " .. LocalPlayer.Name .. "\n**Time:** " .. os.date("%d/%m/%Y %H:%M:%S"),
+                0x55FF55
+            )
+        else
+            Log("Khong the xac nhan trade")
+        end
+    end)
+
     discordBtn.MouseButton1Click:Connect(function()
         SendWebhook(
             "AutoTrade - Manual",
@@ -883,24 +1359,35 @@ local function CreateMainUI()
         RefreshSummary()
     end)
 
-    -- Initial render
-    RenderList()
-    UpdateTargetLbl()
-    RefreshSummary()
+    acToggle.MouseButton1Click:Connect(function()
+        AutoConfirm = not AutoConfirm
+        if AutoConfirm then
+            SetText(acToggle, "Auto: ON")
+            SetColor(acToggle, Color3.fromRGB(25, 60, 30))
+            pcall(function() acToggle.TextColor3 = C.green end)
+            StartAutoConfirm()
+        else
+            SetText(acToggle, "Auto: OFF")
+            SetColor(acToggle, Color3.fromRGB(50, 30, 30))
+            pcall(function() acToggle.TextColor3 = C.red end)
+            StopAutoConfirm()
+        end
+    end)
 
     SG.Parent = LocalPlayer.PlayerGui
     MainUI = SG
 
-    -- Slide in
     pcall(function()
-        Main.Position = UDim2.new(0, -400, 0.5, -230)
+        Main.Position = UDim2.new(0, -400, 0.5, -250)
         local t = TweenService:Create(Main, TweenInfo.new(0.3, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
-            Position = UDim2.new(0, 80, 0.5, -230)
+            Position = UDim2.new(0, 80, 0.5, -250)
         })
         t:Play()
     end)
     MenuOpen = true
     Log("Menu da mo!")
+
+    return SG
 end
 
 -- ===================== TOGGLE BUTTON =====================
@@ -937,10 +1424,8 @@ local function CreateToggleButton()
         Font = Enum.Font.GothamBold
     })
 
-    -- Draggable toggle
     MakeDraggable(Btn)
 
-    -- Hover
     Btn.MouseEnter:Connect(function()
         pcall(function()
             TweenService:Create(Btn, TweenInfo.new(0.12), {BackgroundColor3 = Color3.fromRGB(35, 55, 85)}):Play()
@@ -952,7 +1437,6 @@ local function CreateToggleButton()
         end)
     end)
 
-    -- Left click: toggle
     Btn.MouseButton1Click:Connect(function()
         pcall(function()
             TweenService:Create(Btn, TweenInfo.new(0.08), {Size = UDim2.new(0, 52, 0, 52)}):Play()
@@ -966,7 +1450,7 @@ local function CreateToggleButton()
                 if main then
                     pcall(function()
                         local t = TweenService:Create(main, TweenInfo.new(0.22, Enum.EasingStyle.Quad), {
-                            Position = UDim2.new(0, -400, 0.5, -230)
+                            Position = UDim2.new(0, -400, 0.5, -250)
                         })
                         t:Play()
                         t.Completed:Connect(function()
@@ -987,7 +1471,7 @@ local function CreateToggleButton()
                     main.Visible = true
                     pcall(function()
                         local t = TweenService:Create(main, TweenInfo.new(0.3, Enum.EasingStyle.Back), {
-                            Position = UDim2.new(0, 80, 0.5, -230)
+                            Position = UDim2.new(0, 80, 0.5, -250)
                         })
                         t:Play()
                     end)
@@ -999,10 +1483,10 @@ local function CreateToggleButton()
         end
     end)
 
-    -- Right click: destroy
     Btn.MouseButton2Click:Connect(function()
         pcall(function() SG:Destroy() end)
         ToggleUI = nil
+        StopAutoConfirm()
     end)
 
     SG.Parent = LocalPlayer.PlayerGui
@@ -1031,7 +1515,6 @@ local function CreatePlayerSelector(onSelect)
     Corner(Main, 16)
     Stroke(Main, C.bg3, 1)
 
-    -- Draggable header
     local h = Frame(Main, {
         Size = UDim2.new(1, 0, 0, 42),
         BackgroundColor3 = Color3.fromRGB(22, 22, 36),
@@ -1070,7 +1553,6 @@ local function CreatePlayerSelector(onSelect)
         PlayerSelUI = nil
     end)
 
-    -- Refresh button
     local refreshBtn = Btn(Main, {
         Size = UDim2.new(0, 70, 0, 26),
         Position = UDim2.new(1, -78, 0, 12),
@@ -1191,61 +1673,32 @@ Log("======================================")
 Log("Sailor Piece AutoTrade")
 Log("======================================")
 
--- Test webhook
 TestWebhook()
-
--- Tao toggle
 CreateToggleButton()
 
--- Tao main UI (an ban dau)
 task.wait(0.3)
 CreateMainUI()
 
--- Quet inventory
 task.wait(0.5)
-ScanInventory()
+InventoryPanel = FindInventoryPanel()
+if InventoryPanel then
+    Log("Tim thay InventoryPanelClient")
+    SwitchToTab("Items")
+    task.wait(0.2)
+    ScanInventory()
+else
+    Log("Chua mo inventory - quet khi mo menu")
+end
 
--- Render list
 if MainUI then
     task.wait(0.3)
-    local main = MainUI:FindFirstChildWhichIsA("Frame")
-    if main then
-        local body = main:FindFirstChild("Body")
-        if body then
-            local itemFrame = body:FindFirstChild("ItemFrame")
-            if itemFrame then
-                local scroll = itemFrame:FindFirstChild("ItemScroll")
-                if scroll then
-                    RenderItems(scroll, function()
-                        local cnt = 0; local val = 0
-                        for _, item in ipairs(Inventory) do
-                            if item.selected then
-                                cnt = cnt + item.qty
-                                val = val + item.value * item.qty
-                            end
-                        end
-                        local sumRow = body:FindFirstChild("Summary")
-                        if sumRow then
-                            local labels = sumRow:GetChildren()
-                            for _, l in ipairs(labels) do
-                                if l:IsA("TextLabel") then
-                                    local tx = l.Text
-                                    if tx and tx:find("Chon:") then
-                                        pcall(function() l.Text = "Chon: " .. cnt end)
-                                    elseif tx and tx:find("Gia tri:") then
-                                        pcall(function() l.Text = "Gia tri: " .. FormatVal(val) end)
-                                    end
-                                end
-                            end
-                        end
-                    end)
-                end
-            end
-        end
+    if MainUI_RenderItems then
+        MainUI_RenderItems()
     end
 end
 
 Log("======================================")
 Log("Khoi dong xong!")
 Log("<> : Mo/tat menu")
+Log("Auto-confirm: cho phep tu dong chap nhan trade")
 Log("======================================")
